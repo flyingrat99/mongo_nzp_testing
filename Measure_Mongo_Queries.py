@@ -46,6 +46,20 @@ TPID_VOLUMES = {
     1000020: 2000
 }
 
+# Sample JSON for document structure
+SAMPLE_JSON = '''{
+  "_id": {
+    "$oid": "67ef08ea7e382fec192d35d3"
+  },
+  "tracking_reference": "NZ100000001",
+  "tpid": 1000011,
+  "edifact_code": 500,
+  "event_description": "Delivered",
+  "event_datetime": {
+    "$date": "2025-03-06T04:18:28.000Z"
+  }
+}'''
+
 class MongoQueryApp:
     def __init__(self, root):
         self.root = root
@@ -90,6 +104,11 @@ class MongoQueryApp:
         
         self.status_label = ttk.Label(self.connection_frame, text="Connected", foreground="green")
         self.status_label.pack(side=tk.LEFT, padx=10)
+        
+        # Add Sample JSON button
+        self.sample_json_btn = ttk.Button(self.connection_frame, text="Sample JSON",
+                                        command=self.show_sample_json)
+        self.sample_json_btn.pack(side=tk.LEFT, padx=10)
         
         # Create a container frame for Data Range and Date Range
         self.range_container = ttk.Frame(root)
@@ -564,6 +583,36 @@ class MongoQueryApp:
         if hasattr(self, 'current_tooltip'):
             self.current_tooltip.destroy()
             del self.current_tooltip
+
+    def show_sample_json(self):
+        """Show a popup window with sample JSON document structure."""
+        # Create popup window
+        popup = tk.Toplevel(self.root)
+        popup.title("Sample Document Structure")
+        popup.geometry("500x300")
+        
+        # Make the window float on top
+        popup.transient(self.root)
+        popup.grab_set()
+        
+        # Create text widget with JSON content
+        text_widget = tk.Text(popup, wrap=tk.NONE, font=("Courier", 10))
+        text_widget.insert("1.0", SAMPLE_JSON)
+        text_widget.config(state="disabled")  # Make it read-only
+        
+        # Add scrollbars
+        y_scrollbar = ttk.Scrollbar(popup, orient="vertical", command=text_widget.yview)
+        x_scrollbar = ttk.Scrollbar(popup, orient="horizontal", command=text_widget.xview)
+        text_widget.configure(yscrollcommand=y_scrollbar.set, xscrollcommand=x_scrollbar.set)
+        
+        # Pack everything
+        text_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        y_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        x_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Add close button
+        close_btn = ttk.Button(popup, text="Close", command=popup.destroy)
+        close_btn.pack(pady=10)
 
 if __name__ == "__main__":
     root = tk.Tk()
