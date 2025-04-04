@@ -32,6 +32,20 @@ COLLECTIONS = {
     "3 months (38.6M) - Jan-Mar": "summary_3_months"
 }
 
+# TPID monthly volumes
+TPID_VOLUMES = {
+    1000011: 500000,
+    1000012: 300000,
+    1000013: 200000,
+    1000014: 100000,
+    1000015: 75000,
+    1000016: 50000,
+    1000017: 25000,
+    1000018: 10000,
+    1000019: 5000,
+    1000020: 2000
+}
+
 class MongoQueryApp:
     def __init__(self, root):
         self.root = root
@@ -77,18 +91,22 @@ class MongoQueryApp:
         self.status_label = ttk.Label(self.connection_frame, text="Connected", foreground="green")
         self.status_label.pack(side=tk.LEFT, padx=10)
         
-        # Data Range Selection
-        self.range_frame = ttk.LabelFrame(root, text="Data Range", padding=10)
-        self.range_frame.pack(fill=tk.X, padx=10, pady=5)
+        # Create a container frame for Data Range and Date Range
+        self.range_container = ttk.Frame(root)
+        self.range_container.pack(fill=tk.X, padx=10, pady=5)
+        
+        # Data Range Selection with radio buttons
+        self.range_frame = ttk.LabelFrame(self.range_container, text="Data Range", padding=10)
+        self.range_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         
         self.collection_var = tk.StringVar(value="1 week (3M) - 1st - 7th March")
         for text, _ in COLLECTIONS.items():
             ttk.Radiobutton(self.range_frame, text=text, variable=self.collection_var, value=text,
                            command=self.update_date_range).pack(anchor=tk.W)
         
-        # Date Range Selection
-        self.date_frame = ttk.LabelFrame(root, text="Date Range", padding=10)
-        self.date_frame.pack(fill=tk.X, padx=10, pady=5)
+        # Date Range Selection with calendar widgets
+        self.date_frame = ttk.LabelFrame(self.range_container, text="Date Range", padding=10)
+        self.date_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
         
         self.use_date_range = tk.BooleanVar()
         ttk.Checkbutton(self.date_frame, text="Use Date Range", variable=self.use_date_range, 
@@ -98,16 +116,19 @@ class MongoQueryApp:
         default_from_date = datetime(2025, 3, 1)
         default_to_date = datetime(2025, 3, 7)
         
-        self.from_date = DateEntry(self.date_frame, width=12, background='darkblue',
+        date_controls = ttk.Frame(self.date_frame)
+        date_controls.pack(fill=tk.X, pady=(5, 0))
+        
+        ttk.Label(date_controls, text="From:").pack(side=tk.LEFT, padx=5)
+        self.from_date = DateEntry(date_controls, width=12, background='darkblue',
                                  foreground='white', borderwidth=2, date_pattern='dd/mm/yy',
                                  year=2025, month=3, day=1)
-        self.to_date = DateEntry(self.date_frame, width=12, background='darkblue',
+        self.from_date.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Label(date_controls, text="To:").pack(side=tk.LEFT, padx=5)
+        self.to_date = DateEntry(date_controls, width=12, background='darkblue',
                                foreground='white', borderwidth=2, date_pattern='dd/mm/yy',
                                year=2025, month=3, day=7)
-        
-        ttk.Label(self.date_frame, text="From:").pack(side=tk.LEFT, padx=5)
-        self.from_date.pack(side=tk.LEFT, padx=5)
-        ttk.Label(self.date_frame, text="To:").pack(side=tk.LEFT, padx=5)
         self.to_date.pack(side=tk.LEFT, padx=5)
         
         # TPID Selection
@@ -115,11 +136,20 @@ class MongoQueryApp:
         self.tpid_frame.pack(fill=tk.X, padx=10, pady=5)
         
         self.tpid_vars = {}
+        self.tpid_checkbuttons = {}  # Store references to checkbuttons
         for i in range(10):
             tpid = 1000011 + i
             var = tk.BooleanVar(value=(tpid == 1000011))  # Set 1000011 to be checked by default
             self.tpid_vars[tpid] = var
-            ttk.Checkbutton(self.tpid_frame, text=f"TPID {tpid}", variable=var).pack(side=tk.LEFT, padx=5)
+            
+            # Create checkbutton
+            cb = ttk.Checkbutton(self.tpid_frame, text=f"TPID {tpid}", variable=var)
+            cb.pack(side=tk.LEFT, padx=5)
+            self.tpid_checkbuttons[tpid] = cb
+            
+            # Bind hover events
+            cb.bind("<Enter>", lambda e, t=tpid: self.show_tpid_volume(e, t))
+            cb.bind("<Leave>", self.hide_tooltip)
         
         # Status Buttons
         self.status_frame = ttk.Frame(root, padding=10)
@@ -150,28 +180,58 @@ class MongoQueryApp:
         self.results_frame = ttk.LabelFrame(root, text="Query Results", padding=10)
         self.results_frame.pack(fill=tk.X, padx=10, pady=5)
         
-        self.count_label = ttk.Label(self.results_frame, text="Count: 0", 
-                                   font=("Arial", 24, "bold"), foreground="red")
-        self.count_label.pack(pady=5)
+        # Left-aligned results with query details
+        self.results_container = ttk.Frame(self.results_frame)
+        self.results_container.pack(fill=tk.X, expand=True)
         
-        self.time_label = ttk.Label(self.results_frame, text="Response Time: 0ms")
-        self.time_label.pack(pady=2)
+        # Results on the left
+        self.results_left = ttk.Frame(self.results_container)
+        self.results_left.pack(side=tk.LEFT, padx=20)
         
-        self.parcels_label = ttk.Label(self.results_frame, text="Parcels: 0")
-        self.parcels_label.pack(pady=2)
+        self.count_label = ttk.Label(self.results_left, text="Count: 0", 
+                                   font=("Arial", 24, "bold"), foreground="red",
+                                   justify=tk.LEFT)
+        self.count_label.pack(anchor=tk.W, pady=5)
+        
+        self.time_label = ttk.Label(self.results_left, text="Response Time: 0ms",
+                                  justify=tk.LEFT)
+        self.time_label.pack(anchor=tk.W, pady=2)
+        
+        self.parcels_label = ttk.Label(self.results_left, text="Parcels: 0",
+                                     justify=tk.LEFT)
+        self.parcels_label.pack(anchor=tk.W, pady=2)
+        
+        # Query details on the right
+        self.results_right = ttk.Frame(self.results_container)
+        self.results_right.pack(side=tk.LEFT, padx=20, fill=tk.X, expand=True)
+        
+        self.query_label = ttk.Label(self.results_right, text="Aggregation Pipeline Query:",
+                                   justify=tk.LEFT, wraplength=600)
+        self.query_label.pack(anchor=tk.W)
         
         # Query Button Frame
         self.query_frame = ttk.Frame(root, padding=10)
         self.query_frame.pack(fill=tk.X, padx=10, pady=5)
         
-        # Performance Test Button
-        self.performance_btn = ttk.Button(self.query_frame, text="Performance Test", 
-                                        command=self.run_performance_test)
-        self.performance_btn.pack(side=tk.LEFT, padx=5)
+        # Left side: Performance Test Button with tooltip
+        self.button_frame = ttk.Frame(self.query_frame)
+        self.button_frame.pack(side=tk.LEFT, padx=5)
         
-        # Set up tooltip for Performance Test button
+        self.performance_btn = ttk.Button(self.button_frame, text="Performance Test", 
+                                        command=self.run_performance_test)
+        self.performance_btn.pack(side=tk.LEFT)
+        
         self.performance_btn.bind("<Enter>", self.show_performance_details)
         self.performance_btn.bind("<Leave>", self.hide_query_details)
+        
+        # Right side: Performance Test Query Display
+        self.perf_query_frame = ttk.Frame(self.query_frame)
+        self.perf_query_frame.pack(side=tk.LEFT, padx=20, fill=tk.X, expand=True)
+        
+        self.perf_query_label = ttk.Label(self.perf_query_frame, 
+                                        text="Performance Test Aggregation Pipeline:",
+                                        justify=tk.LEFT)
+        self.perf_query_label.pack(anchor=tk.W)
         
         # Graph Frame
         self.graph_frame = ttk.Frame(root)
@@ -261,15 +321,17 @@ class MongoQueryApp:
         collection = db[COLLECTIONS[self.collection_var.get()]]
         match_stage = self.build_query(status)
         
-        # First get total parcels for selected TPIDs
+        # Get selected TPIDs for query
         selected_tpids = [tpid for tpid, var in self.tpid_vars.items() if var.get()]
         tpid_query = {"tpid": {"$in": selected_tpids}}
         
-        # Get total parcels count
+        # Pipeline for total parcels count
         pipeline_total = [
             {"$match": tpid_query},
             {"$count": "total"}
         ]
+        
+        # Execute total parcels query
         total_result = list(collection.aggregate(
             pipeline_total,
             allowDiskUse=False,
@@ -277,8 +339,8 @@ class MongoQueryApp:
         ))
         total_parcels = total_result[0]["total"] if total_result else 0
         self.parcels_label.config(text=f"Parcels: {total_parcels:,}")
-
-        # Determine which index to use based on the query
+        
+        # Determine optimal index based on query conditions
         hint = None
         if "event_datetime" in match_stage and selected_tpids and status:
             hint = "tpid_1_edifact_code_1_event_datetime_1"
@@ -295,12 +357,17 @@ class MongoQueryApp:
         elif status:
             hint = "edifact_code_1"
         
-        # Optimize the pipeline for counting
+        # Build and execute the main query pipeline
         pipeline = [
             {"$match": match_stage},
             {"$count": "total"}
         ]
         
+        # Update query details display
+        query_text = f"Aggregation Pipeline:\n{pipeline}\n\nUsing index hint: {hint}"
+        self.query_label.config(text=query_text)
+        
+        # Execute query and measure performance
         start_time = time.time()
         result = list(collection.aggregate(
             pipeline,
@@ -309,6 +376,7 @@ class MongoQueryApp:
         ))
         end_time = time.time()
         
+        # Update results display
         count = result[0]["total"] if result else 0
         self.count_label.config(text=f"Count: {count:,}")
         self.time_label.config(text=f"Response Time: {(end_time - start_time) * 1000:.2f}ms")
@@ -345,6 +413,14 @@ class MongoQueryApp:
                 {"$match": match_stage},
                 {"$count": "total"}
             ]
+            
+            # Update performance test query display
+            query_text = (
+                f"Collection: {collection_name}\n"
+                f"Aggregation Pipeline:\n{pipeline}\n"
+                f"Using index hint: {hint}"
+            )
+            self.perf_query_label.config(text=query_text)
             
             start_time = time.time()
             result = list(db[collection].aggregate(
@@ -466,6 +542,28 @@ class MongoQueryApp:
                          background="#ffffe0", relief='solid', borderwidth=1)
         label.pack()
         self.tooltip = tooltip
+
+    def show_tpid_volume(self, event, tpid):
+        """Show tooltip with TPID volume information."""
+        tooltip = tk.Toplevel(self.root)
+        tooltip.wm_overrideredirect(True)
+        tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+        
+        volume = TPID_VOLUMES[tpid]
+        volume_text = f"{volume:,} parcels/month"
+        
+        label = ttk.Label(tooltip, text=volume_text, justify=tk.LEFT,
+                         background="#ffffe0", relief='solid', borderwidth=1,
+                         padding=5)
+        label.pack()
+        
+        self.current_tooltip = tooltip
+    
+    def hide_tooltip(self, event=None):
+        """Hide the current tooltip if it exists."""
+        if hasattr(self, 'current_tooltip'):
+            self.current_tooltip.destroy()
+            del self.current_tooltip
 
 if __name__ == "__main__":
     root = tk.Tk()

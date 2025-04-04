@@ -28,7 +28,6 @@ def create_indexes():
         print(f"Creating single-field indexes for {collection_name}...")
         collection.create_index([("tpid", ASCENDING)], name="tpid_1")
         collection.create_index([("edifact_code", ASCENDING)], name="edifact_code_1")
-        collection.create_index([("event_datetime", ASCENDING)], name="event_datetime_1")
         collection.create_index([("tracking_reference", ASCENDING)], name="tracking_reference_1")
         
         # Create compound indexes for common query patterns
