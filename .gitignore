@@ -24,3 +24,7 @@ build/
 
 # Local development settings
 .env 
+
+# Mongosh.exe
+# mongosh_cyrpt_v1.dll
+mongosh*.*
