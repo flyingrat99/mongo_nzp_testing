@@ -883,7 +883,7 @@ class MongoQueryApp:
                     count = result[0]["total"] if result else 0
                     response_time = (end_time - start_time) * 1000  # Convert to milliseconds
                 
-                    print(f"Query completed in {response_time:.2f}ms, found {count:,} documents")
+                    print(f"Query completed in {response_time:.2f}ms, found {count:,} parcels")
                     
                     results[display_name] = {
                         "time": response_time,
@@ -892,7 +892,7 @@ class MongoQueryApp:
                     
                     # Update the performance time label
                     self.perf_time_labels[collection_name].config(
-                        text=f"{display_name}: {response_time:.2f}ms ({count:,} documents)"
+                        text=f"{display_name}: {response_time:.2f}ms ({count:,} parcels)"
                     )
                 
             except Exception as e:
