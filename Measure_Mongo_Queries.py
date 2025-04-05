@@ -630,7 +630,7 @@ class MongoQueryApp:
             # Use optimized query for time series collections
             if self.current_db == "nzpost_summary_append":
                 total_result, total_time = self.run_optimized_time_series_query(
-                    collection, pipeline_total, hint_for_total, 30000
+                    collection, pipeline_total, hint_for_total, 1200000
                 )
             else:
                 # Standard query execution for regular collections
@@ -702,7 +702,7 @@ class MongoQueryApp:
             # Run optimized query for time series collections
             if self.current_db == "nzpost_summary_append":
                 result, response_time = self.run_optimized_time_series_query(
-                    collection, pipeline, hint, 30000
+                    collection, pipeline, hint, 1200000
                 )
                 count = result[0]["total"] if result else 0
             else:
@@ -974,7 +974,7 @@ class MongoQueryApp:
         # Create a new window for the plot
         plot_window = tk.Toplevel(self.root)
         plot_window.title("Performance Test Results")
-        plot_window.geometry("1000x900")  # Increased height to 900
+        plot_window.geometry("1000x1000")  # Increased height to 1000
         
         # Add description at the top
         desc_frame = ttk.Frame(plot_window)
@@ -982,6 +982,7 @@ class MongoQueryApp:
         
         # Create description text
         desc_text = (
+            f"Database: {self.current_db}\n\n"
             "Performance Test Description:\n"
             "Querying collections with TPIDs [1000011, 1000012, 1000013, 1000014, 1000015]\n"
             "Finding parcels with status Delivered (500) or Attempted Delivery (600)\n"
