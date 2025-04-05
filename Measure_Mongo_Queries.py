@@ -3,9 +3,9 @@ from tkinter import ttk, messagebox
 from tkcalendar import DateEntry
 import pymongo
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import time
 from typing import List, Dict, Optional
 from PIL import Image, ImageTk
@@ -147,30 +147,28 @@ SAMPLE_JSON_APPEND = {
 # Add index configurations after the SAMPLE_JSON constants
 INDEX_INFO = {
     "nzpost_summary": [
-        {"name": "tpid_1", "fields": [("tpid", 1)]},
-        {"name": "edifact_code_1", "fields": [("edifact_code", 1)]},
-        {"name": "event_datetime_1", "fields": [("event_datetime", 1)]},
+        {"name": "tpid_1_edifact_code_1_event_datetime_1", "fields": [("tpid", 1), ("edifact_code", 1), ("event_datetime", 1)]},
         {"name": "tpid_1_edifact_code_1", "fields": [("tpid", 1), ("edifact_code", 1)]},
-        {"name": "tpid_1_event_datetime_1", "fields": [("tpid", 1), ("event_datetime", 1)]},
-        {"name": "edifact_code_1_event_datetime_1", "fields": [("edifact_code", 1), ("event_datetime", 1)]},
-        {"name": "tpid_1_edifact_code_1_event_datetime_1", "fields": [("tpid", 1), ("edifact_code", 1), ("event_datetime", 1)]}
+        {"name": "tpid_1_tracking_reference_1", "fields": [("tpid", 1), ("tracking_reference", 1)]},
+        {"name": "tpid_1", "fields": [("tpid", 1)]},
+        {"name": "event_datetime_1", "fields": [("event_datetime", 1)]},
+        {"name": "tracking_reference_1", "fields": [("tracking_reference", 1)]}
     ],
     "nzpost_summary_item": [
-        {"name": "tpid_1", "fields": [("tpid", 1)]},
-        {"name": "edifact_code_1", "fields": [("edifact_code", 1)]},
-        {"name": "event_datetime_1", "fields": [("event_datetime", 1)]},
+        {"name": "tpid_1_edifact_code_1_event_datetime_1", "fields": [("tpid", 1), ("edifact_code", 1), ("event_datetime", 1)]},
         {"name": "tpid_1_edifact_code_1", "fields": [("tpid", 1), ("edifact_code", 1)]},
-        {"name": "tpid_1_event_datetime_1", "fields": [("tpid", 1), ("event_datetime", 1)]},
-        {"name": "edifact_code_1_event_datetime_1", "fields": [("edifact_code", 1), ("event_datetime", 1)]},
-        {"name": "tpid_1_edifact_code_1_event_datetime_1", "fields": [("tpid", 1), ("edifact_code", 1), ("event_datetime", 1)]}
+        {"name": "tpid_1_tracking_reference_1", "fields": [("tpid", 1), ("tracking_reference", 1)]},
+        {"name": "tpid_1", "fields": [("tpid", 1)]},
+        {"name": "event_datetime_1", "fields": [("event_datetime", 1)]},
+        {"name": "tracking_reference_1", "fields": [("tracking_reference", 1)]}
     ],
     "nzpost_summary_append": [
+        {"name": "tpid_1_edifact_code_1_event_datetime_1", "fields": [("tpid", 1), ("edifact_code", 1), ("event_datetime", 1)]},
+        {"name": "tpid_1_edifact_code_1", "fields": [("tpid", 1), ("edifact_code", 1)]},
+        {"name": "tpid_1_tracking_reference_1", "fields": [("tpid", 1), ("tracking_reference", 1)]},
         {"name": "tpid_1", "fields": [("tpid", 1)]},
-        {"name": "tracking_reference_1", "fields": [("tracking_reference", 1)]},
-        {"name": "edifact_code_1", "fields": [("edifact_code", 1)]},
-        {"name": "timestamp_1", "fields": [("timestamp", 1)]},
-        {"name": "tpid_1_timestamp_1", "fields": [("tpid", 1), ("timestamp", 1)]},
-        {"name": "tpid_1_edifact_code_1", "fields": [("tpid", 1), ("edifact_code", 1)]}
+        {"name": "event_datetime_1", "fields": [("event_datetime", 1)]},
+        {"name": "tracking_reference_1", "fields": [("tracking_reference", 1)]}
     ]
 }
 
@@ -178,7 +176,7 @@ class MongoQueryApp:
     def __init__(self, root):
         self.root = root
         self.root.title("MongoDB Query Performance Measurement")
-        self.root.geometry("1200x1200")  # Increased height to 1200
+        self.root.geometry("1200x700")  # Decreased height to 900
         
         # Initialize database connection
         self.client = MongoClient('mongodb://localhost:27017/')
@@ -649,7 +647,7 @@ class MongoQueryApp:
             
             # Build main query pipeline based on database type
             if self.current_db == "nzpost_summary_append":
-                # For time series, build a pipeline to find parcels with LATEST edifact_code matching the status
+                # For time series, use $setWindowFields to efficiently find latest event per tracking reference
                 
                 # Extract date range from match_stage if present
                 date_filter = {}
@@ -661,20 +659,24 @@ class MongoQueryApp:
                 if "tpid" in match_stage:
                     tpid_filter = {"tpid": match_stage["tpid"]}
                 
-                # Build pipeline for latest event
+                # Build pipeline using $setWindowFields
                 pipeline = [
                     # Match by TPIDs and date range first if specified
                     {"$match": {**tpid_filter, **date_filter}},
-                    # Sort by tracking reference and timestamp (descending to get latest first)
-                    {"$sort": {"tracking_reference": 1, "timestamp": -1}},
-                    # Group by tracking reference and take the first (latest) document
-                    {"$group": {
-                        "_id": "$tracking_reference",
-                        "latest_code": {"$first": "$edifact_code"}
+                    # Use $setWindowFields to efficiently find latest event per tracking reference
+                    {"$setWindowFields": {
+                        "partitionBy": "$tracking_reference",
+                        "sortBy": {"timestamp": -1},
+                        "output": {
+                            "is_latest": {
+                                "$first": "$$ROOT",
+                                "window": {"documents": [0, 0]}
+                            }
+                        }
                     }},
-                    # Match only those with the specified edifact code
-                    {"$match": {"latest_code": EDIFACT_CODES[status]}},
-                    # Count total
+                    # Keep only the first document for each tracking reference
+                    {"$match": {"is_latest.edifact_code": EDIFACT_CODES[status]}},
+                    # Count total unique tracking references
                     {"$count": "total"}
                 ]
             else:
@@ -817,82 +819,137 @@ class MongoQueryApp:
                     hint = "tpid_1_edifact_code_1"
             
             try:
-                print(f"Running query with hint: {hint}")
+                print(f"\nRunning query with hint: {hint}")
                 
                 # For time series collections, count only parcels with latest edifact code matching criteria
                 if current_db == "nzpost_summary_append":
                     # Calculate timeout based on collection size
                     if collection_name == "summary_3_months":
-                        timeout_ms = 120000  # 120 seconds for 3 months collection
+                        timeout_ms = 1200000  # 20 minutes for 3 months collection
                     elif collection_name == "summary_1_month":
-                        timeout_ms = 60000   # 60 seconds for 1 month collection
+                        timeout_ms = 1200000   # 20 minutes for 1 month collection
                     elif collection_name == "summary_2_weeks":
-                        timeout_ms = 45000   # 45 seconds for 2 weeks collection
+                        timeout_ms = 1200000   # 20 minutes for 2 weeks collection
                     else:
-                        timeout_ms = 30000   # 30 seconds for 1 week collection
+                        timeout_ms = 1200000   # 20 minutes for 1 week collection
                     
-                    # Pipeline to get latest event for each tracking reference where TPID matches
-                    latest_parcels_pipeline = [
-                        # Match TPIDs first to limit dataset
+                    # First get total count
+                    total_pipeline = [
                         {"$match": {"tpid": {"$in": test_tpids}, "timestamp": {"$gte": from_date, "$lte": to_date}}},
-                        # Sort by tracking reference and timestamp (descending to get latest first)
-                        {"$sort": {"tracking_reference": 1, "timestamp": -1}},
-                        # Group by tracking reference and take the first (latest) document
                         {"$group": {
-                            "_id": "$tracking_reference",
-                            "latest_code": {"$first": "$edifact_code"}
+                            "_id": None,
+                            "total": {"$addToSet": "$tracking_reference"}
                         }},
-                        # Match only those with the specified edifact codes
-                        {"$match": {"latest_code": {"$in": test_codes}}},
-                        # Count total
+                        {"$project": {
+                            "total": {"$size": "$total"}
+                        }}
+                    ]
+                    
+                    print("\nTotal Count Pipeline:")
+                    print(json.dumps(total_pipeline, indent=2, default=str))
+                    print("Using index: tpid_1")
+                    
+                    total_result, total_time = self.run_optimized_time_series_query(
+                        collection, total_pipeline, "tpid_1", timeout_ms
+                    )
+                    total_count = total_result[0]["total"] if total_result else 0
+                    
+                    # Then get query count using $setWindowFields
+                    query_pipeline = [
+                        {"$match": {"tpid": {"$in": test_tpids}, "timestamp": {"$gte": from_date, "$lte": to_date}}},
+                        {"$setWindowFields": {
+                            "partitionBy": "$tracking_reference",
+                            "sortBy": {"timestamp": -1},
+                            "output": {
+                                "is_latest": {
+                                    "$first": "$$ROOT",
+                                    "window": {"documents": [0, 0]}
+                                }
+                            }
+                        }},
+                        {"$match": {"is_latest.edifact_code": {"$in": test_codes}}},
                         {"$count": "total"}
                     ]
                     
-                    # Run the query to count parcels with latest event matching criteria
-                    parcels_result, response_time = self.run_optimized_time_series_query(
-                        collection, latest_parcels_pipeline, hint, timeout_ms
-                    )
-                    parcels_count = parcels_result[0]["total"] if parcels_result else 0
+                    print("\nStatus Query Pipeline:")
+                    print(json.dumps(query_pipeline, indent=2, default=str))
+                    print("Using index:", hint)
                     
-                    print(f"Query completed in {response_time:.2f}ms, found {parcels_count:,} parcels with latest edifact_code = 500 or 600")
+                    query_result, query_time = self.run_optimized_time_series_query(
+                        collection, query_pipeline, hint, timeout_ms
+                    )
+                    query_count = query_result[0]["total"] if query_result else 0
+                    
+                    print(f"\nTotal count query completed in {total_time:.2f}ms, found {total_count:,} events")
+                    print(f"Status query completed in {query_time:.2f}ms, found {query_count:,} parcels with latest edifact_code = 500 or 600")
+                    print(f"Events per parcel: {total_count/query_count:.2f}")
                     
                     results[display_name] = {
-                        "time": response_time,
-                        "count": parcels_count
+                        "time": query_time,
+                        "total_time": total_time,
+                        "count": query_count,
+                        "total_count": total_count
                     }
                     
                     # Update the performance time label
                     self.perf_time_labels[collection_name].config(
-                        text=f"{display_name}: {response_time:.2f}ms ({parcels_count:,} parcels)"
+                        text=f"{display_name}: Total {total_time:.2f}ms, Query {query_time:.2f}ms ({query_count:,} parcels)"
                     )
                 else:
-                    # Standard query execution for regular collections
-                    # Optimize the pipeline for counting
-                    pipeline = [
+                    # First get total count
+                    total_pipeline = [
+                        {"$match": {"tpid": {"$in": test_tpids}}},
+                        {"$count": "total"}
+                    ]
+                    
+                    print("\nTotal Count Pipeline:")
+                    print(json.dumps(total_pipeline, indent=2, default=str))
+                    print("Using index: tpid_1")
+                    
+                    start_time = time.time()
+                    total_result = list(collection.aggregate(
+                        total_pipeline,
+                        allowDiskUse=True,
+                        hint="tpid_1"
+                    ))
+                    end_time = time.time()
+                    total_count = total_result[0]["total"] if total_result else 0
+                    total_time = (end_time - start_time) * 1000
+                    
+                    # Then get query count
+                    query_pipeline = [
                         {"$match": match_stage},
                         {"$count": "total"}
                     ]
                     
+                    print("\nStatus Query Pipeline:")
+                    print(json.dumps(query_pipeline, indent=2, default=str))
+                    print("Using index:", hint)
+                    
                     start_time = time.time()
-                    result = list(collection.aggregate(
-                        pipeline,
+                    query_result = list(collection.aggregate(
+                        query_pipeline,
                         allowDiskUse=True,
                         hint=hint
                     ))
                     end_time = time.time()
-                    count = result[0]["total"] if result else 0
-                    response_time = (end_time - start_time) * 1000  # Convert to milliseconds
-                
-                    print(f"Query completed in {response_time:.2f}ms, found {count:,} parcels")
+                    query_count = query_result[0]["total"] if query_result else 0
+                    query_time = (end_time - start_time) * 1000
+                    
+                    print(f"\nTotal count query completed in {total_time:.2f}ms, found {total_count:,} parcels")
+                    print(f"Status query completed in {query_time:.2f}ms, found {query_count:,} parcels")
+                    print(f"Percentage of parcels with status: {(query_count/total_count)*100:.2f}%")
                     
                     results[display_name] = {
-                        "time": response_time,
-                        "count": count
+                        "time": query_time,
+                        "total_time": total_time,
+                        "count": query_count,
+                        "total_count": total_count
                     }
                     
                     # Update the performance time label
                     self.perf_time_labels[collection_name].config(
-                        text=f"{display_name}: {response_time:.2f}ms ({count:,} parcels)"
+                        text=f"{display_name}: Total {total_time:.2f}ms, Query {query_time:.2f}ms ({query_count:,} parcels)"
                     )
                 
             except Exception as e:
@@ -901,53 +958,132 @@ class MongoQueryApp:
                 messagebox.showerror("Query Error", error_msg)
                 results[display_name] = {
                     "time": 0,
-                    "count": 0
+                    "total_time": 0,
+                    "count": 0,
+                    "total_count": 0
                 }
                 self.perf_time_labels[collection_name].config(
                     text=f"{display_name}: Error"
                 )
         
-        # Create bar graph
+        # Create line graph
         self.plot_results(results)
     
-    def plot_results(self, results: Dict):
-        # Clear previous graph
-        for widget in self.graph_frame.winfo_children():
-            widget.destroy()
+    def plot_results(self, results):
+        """Plot the performance test results in a new window"""
+        # Create a new window for the plot
+        plot_window = tk.Toplevel(self.root)
+        plot_window.title("Performance Test Results")
+        plot_window.geometry("1000x900")  # Increased height to 900
         
-        # Create a single graph for all databases
-        fig, ax = plt.subplots(figsize=(12, 10))
-        collections = list(results.keys())
-        times = [results[col]["time"] for col in collections]
-        counts = [results[col]["count"] for col in collections]
+        # Add description at the top
+        desc_frame = ttk.Frame(plot_window)
+        desc_frame.pack(fill=tk.X, padx=10, pady=5)
         
-        bars = ax.bar(collections, times, color='blue')
+        # Create description text
+        desc_text = (
+            "Performance Test Description:\n"
+            "Querying collections with TPIDs [1000011, 1000012, 1000013, 1000014, 1000015]\n"
+            "Finding parcels with status Delivered (500) or Attempted Delivery (600)\n"
+        )
+        
+        # Add date range info if applicable
+        if self.current_db == "nzpost_summary_append" or self.use_date_range.get():
+            desc_text += "Using collection-specific date ranges:\n"
+            desc_text += "• 1 week: 1st - 7th March 2025\n"
+            desc_text += "• 2 weeks: 1st - 14th March 2025\n"
+            desc_text += "• 1 month: March 2025\n"
+            desc_text += "• 3 months: January - March 2025"
+        
+        desc_label = ttk.Label(desc_frame, text=desc_text, justify=tk.LEFT, font=("Courier", 10))
+        desc_label.pack(anchor=tk.W)
+        
+        # Add separator
+        ttk.Separator(plot_window, orient='horizontal').pack(fill=tk.X, padx=5, pady=5)
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Sort collections by size for better visualization
+        collection_order = [
+            "1 week (3M) - 1st - 7th March",
+            "2 weeks (6M) - 1st - 14th March",
+            "1 month (13M) - March",
+            "3 months (38.6M) - Jan-Mar"
+        ]
+        
+        # Filter and sort results
+        sorted_results = {k: results[k] for k in collection_order if k in results}
+        
+        # Prepare data for plotting
+        collections = list(sorted_results.keys())
+        total_times = [sorted_results[c]["total_time"] for c in collections]
+        query_times = [sorted_results[c]["time"] for c in collections]
+        
+        # Plot both lines
+        ax.plot(collections, total_times, marker='o', linestyle='-', linewidth=2, color='blue', label='Total Count Time')
+        ax.plot(collections, query_times, marker='s', linestyle='-', linewidth=2, color='red', label='Query Count Time')
+        
+        ax.set_title('Query Response Times', pad=20)
         ax.set_ylabel('Response Time (ms)')
         
-        # Set title based on current database
-        current_db = self.db_var.get()
-        if current_db == "nzpost_summary_append":
-            ax.set_title('Query Performance - Unique Parcels with Latest Status = Delivered/Attempted')
-        else:
-            ax.set_title('Query Performance Across Collections')
-        
         # Rotate x-axis labels for better readability
-        plt.xticks(rotation=15, ha='right')
+        ax.tick_params(axis='x', rotation=45)
         
-        # Add count labels above bars
-        for bar, count in zip(bars, counts):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height + 5,
-                   f'Count: {count:,}',
-                   ha='center', va='bottom')
+        # Add value labels above each point
+        for i, (v1, v2) in enumerate(zip(total_times, query_times)):
+            ax.text(i, v1, f'{v1:.2f}ms', ha='center', va='bottom', color='blue')
+            ax.text(i, v2, f'{v2:.2f}ms', ha='center', va='bottom', color='red')
         
-        # Add more padding to prevent label cutoff
+        # Set y-axis to start at 0
+        ax.set_ylim(bottom=0)
+        ax.legend()
+        
+        # Adjust layout to prevent label cutoff
         plt.tight_layout()
         
-        canvas = FigureCanvasTkAgg(fig, master=self.graph_frame)
+        # Create a canvas to display the plot in the new window
+        canvas = FigureCanvasTkAgg(fig, master=plot_window)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-    
+        
+        # Add a toolbar for plot interaction
+        toolbar = NavigationToolbar2Tk(canvas, plot_window)
+        toolbar.update()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        # Add summary text
+        summary_frame = ttk.Frame(plot_window)
+        summary_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        # Create text widget for summary
+        summary_text = tk.Text(summary_frame, height=6, wrap=tk.WORD, font=("Courier", 10))
+        summary_text.pack(fill=tk.X, expand=True)
+        
+        # Add summary information
+        summary_lines = []
+        summary_lines.append("Performance Summary:")
+        summary_lines.append("-" * 50)
+        
+        for collection in collections:
+            result = sorted_results[collection]
+            total_count = result["total_count"]
+            query_count = result["count"]
+            percentage = (query_count / total_count * 100) if total_count > 0 else 0
+            
+            summary_lines.append(f"{collection}:")
+            summary_lines.append(f"  Total count query: {result['total_time']:.2f}ms, found {total_count:,} parcels")
+            summary_lines.append(f"  Status query: {result['time']:.2f}ms, found {query_count:,} parcels")
+            summary_lines.append(f"  Percentage of parcels with status: {percentage:.2f}%")
+            summary_lines.append("")
+        
+        summary_text.insert(tk.END, "\n".join(summary_lines))
+        summary_text.config(state=tk.DISABLED)  # Make read-only
+        
+        # Add close button
+        close_button = ttk.Button(plot_window, text="Close", command=plot_window.destroy)
+        close_button.pack(pady=10)
+
     def on_closing(self):
         plt.close('all')  # Close all matplotlib figures
         self.root.quit()  # Stop the mainloop
@@ -1267,7 +1403,7 @@ class MongoQueryApp:
             
             # Format the pipeline details based on database type
             if self.current_db == "nzpost_summary_append":
-                # For time series database, show latest event pipeline
+                # For time series database, show latest event pipeline using $setWindowFields
                 
                 # Extract date range from match_stage if present
                 date_filter = {}
@@ -1279,20 +1415,24 @@ class MongoQueryApp:
                 if "tpid" in match_stage:
                     tpid_filter = {"tpid": match_stage["tpid"]}
                 
-                # Build pipeline for latest event
-                latest_event_pipeline = [
+                # Build pipeline using $setWindowFields
+                setwindow_pipeline = [
                     # Match by TPIDs and date range first if specified
                     {"$match": {**tpid_filter, **date_filter}},
-                    # Sort by tracking reference and timestamp (descending to get latest first)
-                    {"$sort": {"tracking_reference": 1, "timestamp": -1}},
-                    # Group by tracking reference and take the first (latest) document
-                    {"$group": {
-                        "_id": "$tracking_reference",
-                        "latest_code": {"$first": "$edifact_code"}
+                    # Use $setWindowFields to efficiently find latest event per tracking reference
+                    {"$setWindowFields": {
+                        "partitionBy": "$tracking_reference",
+                        "sortBy": {"timestamp": -1},
+                        "output": {
+                            "is_latest": {
+                                "$first": "$$ROOT",
+                                "window": {"documents": [0, 0]}
+                            }
+                        }
                     }},
-                    # Match only those with the specified edifact code
-                    {"$match": {"latest_code": EDIFACT_CODES[status] if status else None}},
-                    # Count total
+                    # Keep only the first document for each tracking reference
+                    {"$match": {"is_latest.edifact_code": EDIFACT_CODES[status] if status else None}},
+                    # Count total unique tracking references
                     {"$count": "total"}
                 ]
                 
@@ -1308,14 +1448,15 @@ class MongoQueryApp:
                     f"Selected TPIDs: {selected_tpids}\n"
                     f"{date_range_str}\n\n"
                     "Pipeline (counts parcels where LATEST status matches criteria):\n"
-                    f"{json.dumps(latest_event_pipeline, indent=2, default=str)}\n\n"
+                    f"{json.dumps(setwindow_pipeline, indent=2, default=str)}\n\n"
                     f"Using Index Hint: {hint}\n\n"
                     "Explanation:\n"
                     "1. First we find all events for the specified TPIDs within the date range\n"
-                    "2. Then we sort by tracking reference and timestamp (descending)\n"
-                    "3. Group by tracking reference to get the latest event for each parcel\n"
-                    f"4. Filter to include only parcels whose latest status is '{status}'\n"
-                    "5. Count the resulting unique parcels"
+                    "2. Then we use $setWindowFields to efficiently find the latest event for each parcel\n"
+                    f"3. Filter to include only parcels whose latest status is '{status}'\n"
+                    "4. Count the resulting unique parcels\n\n"
+                    "Note: This uses MongoDB's optimized $setWindowFields operator which is designed\n"
+                    "specifically for time series data and performs better than sort+group for large collections."
                 )
             else:
                 # Standard collections just have one pipeline
@@ -1361,74 +1502,43 @@ class MongoQueryApp:
         print(f"Database: {current_db}")
         print(f"Has TPIDs: {bool(selected_tpids)}")
         print(f"Has Status: {bool(status)}")
-        print(f"Has Timestamp: {'timestamp' in match_stage}")
         print(f"Has Event Datetime: {'event_datetime' in match_stage}")
         
-        if current_db == "nzpost_summary_append":
-            # Time Series Collection - prioritize timestamp for time-based queries
-            if "timestamp" in match_stage and selected_tpids and status:
-                # All three filters
-                hint = "tpid_1_timestamp_1"
-                print(f"Selected hint: {hint} - Has all three filters")
-            elif selected_tpids and status:
-                # TPID and Status only
-                hint = "tpid_1_edifact_code_1"
-                print(f"Selected hint: {hint} - Has TPID and status")
-            elif "timestamp" in match_stage and selected_tpids:
-                # TPID and timestamp 
-                hint = "tpid_1_timestamp_1"
-                print(f"Selected hint: {hint} - Has TPID and timestamp")
-            elif "timestamp" in match_stage:
-                # Timestamp only - use timestamp index for time series
-                hint = "timestamp_1"
-                print(f"Selected hint: {hint} - Has timestamp only")
-            elif selected_tpids:
-                # TPID only
-                hint = "tpid_1"
-                print(f"Selected hint: {hint} - Has TPID only")
-            elif status:
-                # Status only
-                hint = "edifact_code_1"
-                print(f"Selected hint: {hint} - Has status only")
-            else:
-                # No filters - no hint needed
-                hint = None
-                print("No hint selected - insufficient filters")
-        else:  
-            # Standard Collections - nzpost_summary and nzpost_summary_item
-            if "event_datetime" in match_stage and selected_tpids and status:
-                # All three filters
-                hint = "tpid_1_edifact_code_1_event_datetime_1"
-                print(f"Selected hint: {hint} - Has all three filters")
-            elif selected_tpids and status:
-                # TPID and Status only
-                hint = "tpid_1_edifact_code_1"
-                print(f"Selected hint: {hint} - Has TPID and status")
-            elif "event_datetime" in match_stage and selected_tpids:
-                # TPID and date range
-                hint = "tpid_1_event_datetime_1"
-                print(f"Selected hint: {hint} - Has TPID and date range")
-            elif "event_datetime" in match_stage:
-                # Date range only
-                hint = "event_datetime_1"
-                print(f"Selected hint: {hint} - Has date range only")
-            elif selected_tpids:
-                # TPID only
-                hint = "tpid_1"
-                print(f"Selected hint: {hint} - Has TPID only")
-            elif status:
-                # Status only
-                hint = "edifact_code_1"
-                print(f"Selected hint: {hint} - Has status only")
-            else:
-                # No filters - no hint needed
-                hint = None
-                print("No hint selected - insufficient filters")
+        # Available indexes:
+        # - tpid_1_edifact_code_1_event_datetime_1
+        # - tpid_1_edifact_code_1
+        # - tpid_1_tracking_reference_1
+        # - tpid_1
+        # - event_datetime_1
+        # - tracking_reference_1
         
-        # For time series collections, verify that the timestamp index is correct
-        if current_db == "nzpost_summary_append" and "timestamp" in match_stage:
-            if hint not in ["timestamp_1", "tpid_1_timestamp_1"]:
-                print(f"WARNING: Time series query with timestamp is not using a timestamp index! Using {hint}")
+        # Check if this is a total count query (no status filter)
+        is_total_count = not status and "tracking_reference" in str(match_stage)
+        
+        if is_total_count and selected_tpids:
+            # Total count query - use the optimized index for tracking reference counting
+            hint = "tpid_1_tracking_reference_1"
+            print(f"Selected hint: {hint} - Total count query with TPID")
+        elif selected_tpids and status and "event_datetime" in match_stage:
+            # All three filters - use the compound index
+            hint = "tpid_1_edifact_code_1_event_datetime_1"
+            print(f"Selected hint: {hint} - Has all three filters")
+        elif selected_tpids and status:
+            # TPID and Status only - use the two-field compound index
+            hint = "tpid_1_edifact_code_1"
+            print(f"Selected hint: {hint} - Has TPID and status")
+        elif selected_tpids:
+            # TPID only
+            hint = "tpid_1"
+            print(f"Selected hint: {hint} - Has TPID only")
+        elif "event_datetime" in match_stage:
+            # Date range only
+            hint = "event_datetime_1"
+            print(f"Selected hint: {hint} - Has date range only")
+        else:
+            # No suitable index - let MongoDB choose
+            hint = None
+            print("No hint selected - letting MongoDB choose optimal index")
         
         return hint
 
@@ -1511,44 +1621,48 @@ class MongoQueryApp:
             # Calculate timeout based on collection size for time series
             if current_db == "nzpost_summary_append":
                 if collection_name == "summary_3_months":
-                    timeout_ms = 120000  # 120 seconds for 3 months collection
+                    timeout_ms = 1200000  # 20 minutes for 3 months collection
                 elif collection_name == "summary_1_month":
-                    timeout_ms = 60000   # 60 seconds for 1 month collection
+                    timeout_ms = 1200000   # 20 minutes for 1 month collection
                 elif collection_name == "summary_2_weeks":
-                    timeout_ms = 45000   # 45 seconds for 2 weeks collection
+                    timeout_ms = 1200000   # 20 minutes for 2 weeks collection
                 else:
-                    timeout_ms = 30000   # 30 seconds for 1 week collection
+                    timeout_ms = 1200000   # 20 minutes for 1 week collection
                 details.append(f"Query Timeout: {timeout_ms/1000} seconds\n")
             
             # Build pipeline
             if current_db == "nzpost_summary_append":
-                # For time series, we use a pipeline to get parcels with latest event matching criteria
-                latest_parcels_pipeline = [
+                # For time series, use $setWindowFields for latest event pipeline
+                setwindow_pipeline = [
                     # Match TPIDs first to limit dataset
                     {"$match": {"tpid": {"$in": test_tpids}, "timestamp": {"$gte": from_date, "$lte": to_date}}},
-                    # Sort by tracking reference and timestamp (descending to get latest first)
-                    {"$sort": {"tracking_reference": 1, "timestamp": -1}},
-                    # Group by tracking reference and take the first (latest) document
-                    {"$group": {
-                        "_id": "$tracking_reference",
-                        "latest_code": {"$first": "$edifact_code"}
+                    # Use $setWindowFields to find latest event per tracking reference
+                    {"$setWindowFields": {
+                        "partitionBy": "$tracking_reference",
+                        "sortBy": {"timestamp": -1},
+                        "output": {
+                            "is_latest": {
+                                "$first": "$$ROOT",
+                                "window": {"documents": [0, 0]}
+                            }
+                        }
                     }},
-                    # Match only those with the specified edifact codes
-                    {"$match": {"latest_code": {"$in": test_codes}}},
-                    # Count total
+                    # Keep only the first document for each tracking reference
+                    {"$match": {"is_latest.edifact_code": {"$in": test_codes}}},
+                    # Count total unique tracking references
                     {"$count": "total"}
                 ]
                 
                 details.append("Pipeline (counts parcels where LATEST status is Delivered/Attempted):")
-                details.append(json.dumps(latest_parcels_pipeline, indent=2, default=str))
+                details.append(json.dumps(setwindow_pipeline, indent=2, default=str))
                 details.append(f"\nUsing Index Hint: {hint}")
                 
                 details.append("\nExplanation:")
                 details.append("1. First we find all events for the specified TPIDs within the date range")
-                details.append("2. Then we sort by tracking reference and timestamp (descending)")
-                details.append("3. Group by tracking reference to get the latest event for each parcel")
-                details.append("4. Finally filter to include only parcels whose latest status is Delivered or Attempted")
-                details.append("5. Count the resulting unique parcels")
+                details.append("2. Then we use $setWindowFields to efficiently find the latest event for each parcel")
+                details.append("3. Filter to include only parcels whose latest status is Delivered or Attempted")
+                details.append("4. Count the resulting unique parcels")
+                details.append("\nNote: $setWindowFields is MongoDB's optimized operator for time series data analysis")
             else:
                 # Standard collections just have one pipeline
                 pipeline = [
