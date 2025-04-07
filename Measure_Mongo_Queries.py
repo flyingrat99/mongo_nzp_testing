@@ -176,7 +176,7 @@ class MongoQueryApp:
     def __init__(self, root):
         self.root = root
         self.root.title("MongoDB Query Performance Measurement")
-        self.root.geometry("1200x700")  # Decreased height to 900
+        self.root.geometry("1200x900")  # Decreased height to 900
         
         # Initialize database connection
         self.client = MongoClient('mongodb://localhost:27017/')
@@ -327,6 +327,13 @@ class MongoQueryApp:
             # Set up tooltip for status buttons
             btn.bind("<Enter>", lambda e, s=status: self.show_query_details(e, s))
             btn.bind("<Leave>", self.hide_query_details)
+        
+        # Add "All events" button
+        self.all_events_btn = ttk.Button(self.status_frame, text="All events", style="Status.TButton",
+                                       command=self.run_all_events_query)
+        self.all_events_btn.pack(side=tk.LEFT, padx=5)
+        self.all_events_btn.bind("<Enter>", self.show_all_events_query_details)
+        self.all_events_btn.bind("<Leave>", self.hide_query_details)
         
         # Results Display
         self.results_frame = ttk.LabelFrame(root, text="Query Results", padding=10)
@@ -1400,10 +1407,53 @@ class MongoQueryApp:
                 date_range_str = f"Date Range: {from_date.strftime('%Y-%m-%d')} to {to_date.strftime('%Y-%m-%d')}"
             
             # Get the current query details
-            match_stage = self.build_query(status)
+            match_stage = self.build_query(status if status != "All events" else None)
             
-            # Format the pipeline details based on database type
-            if self.current_db == "nzpost_summary_append":
+            # Special handling for "All events" query
+            if status == "All events":
+                # Build the all events pipeline
+                all_events_pipeline = [
+                    {"$match": match_stage},
+                    {"$group": {
+                        "_id": {"edifact_code": "$edifact_code", "event_description": "$event_description"},
+                        "count": {"$sum": 1}
+                    }},
+                    {"$project": {
+                        "_id": 0,
+                        "edifact_code": "$_id.edifact_code",
+                        "event_description": "$_id.event_description", 
+                        "count": 1
+                    }},
+                    {"$sort": {"edifact_code": 1}}
+                ]
+                
+                # Determine the hint being used
+                hint = self.get_optimal_hint(match_stage)
+                
+                details = (
+                    "All Events Summary Query\n"
+                    "----------------------\n"
+                    f"Database: {self.current_db}\n"
+                    f"Collection: {COLLECTIONS[self.collection_var.get()]}\n"
+                    f"Selected TPIDs: {selected_tpids}\n"
+                    f"{date_range_str}\n\n"
+                    "Pipeline:\n"
+                    f"{json.dumps(all_events_pipeline, indent=2, default=str)}\n\n"
+                    f"Using Index Hint: {hint}\n\n"
+                    "Explanation:\n"
+                    "1. Match documents based on TPID and date range filters\n"
+                    "2. Group documents by edifact_code and event_description\n"
+                    "3. Count occurrences of each event type\n"
+                    "4. Project the results in a clean format\n"
+                    "5. Sort by edifact_code for consistent display\n\n"
+                    "Note: This query runs entirely on the MongoDB server using aggregation,\n"
+                    "which is more efficient than retrieving all events and counting them client-side."
+                )
+                
+                text.insert(tk.END, details)
+                
+            # Format the pipeline details based on database type for regular status queries
+            elif self.current_db == "nzpost_summary_append":
                 # For time series database, show latest event pipeline using $setWindowFields
                 
                 # Extract date range from match_stage if present
@@ -1459,6 +1509,9 @@ class MongoQueryApp:
                     "Note: This uses MongoDB's optimized $setWindowFields operator which is designed\n"
                     "specifically for time series data and performs better than sort+group for large collections."
                 )
+                
+                text.insert(tk.END, details)
+                
             else:
                 # Standard collections just have one pipeline
                 standard_pipeline = [
@@ -1481,8 +1534,9 @@ class MongoQueryApp:
                     f"{json.dumps(standard_pipeline, indent=2, default=str)}\n\n"
                     f"Using Index Hint: {hint}"
                 )
-            
-            text.insert(tk.END, details)
+                
+                text.insert(tk.END, details)
+                
         except Exception as e:
             text.insert(tk.END, f"Error displaying pipeline: {str(e)}")
         
@@ -1498,11 +1552,15 @@ class MongoQueryApp:
         status = self.active_button.cget("text") if self.active_button else None
         current_db = self.db_var.get()
         
+        # Check if we're in "All events" mode
+        is_all_events = status == "All events"
+        
         # Log hint selection process
         print(f"\n=== Index Hint Selection ===")
         print(f"Database: {current_db}")
         print(f"Has TPIDs: {bool(selected_tpids)}")
-        print(f"Has Status: {bool(status)}")
+        print(f"Status: {status}")
+        print(f"Is All Events mode: {is_all_events}")
         print(f"Has Event Datetime: {'event_datetime' in match_stage}")
         
         # Available indexes:
@@ -1513,6 +1571,30 @@ class MongoQueryApp:
         # - event_datetime_1
         # - tracking_reference_1
         
+        # Special handling for "All events" mode
+        if is_all_events:
+            # For aggregation queries that group by edifact_code, the optimal index depends
+            # on whether we have TPIDs and date ranges
+            if selected_tpids and "event_datetime" in match_stage:
+                # With TPIDs and date range, use the compound index
+                hint = "tpid_1_edifact_code_1_event_datetime_1"
+                print(f"Selected hint for All events: {hint} - Has TPIDs and date range")
+            elif selected_tpids:
+                # With only TPIDs, use this index
+                hint = "tpid_1_edifact_code_1"
+                print(f"Selected hint for All events: {hint} - Has TPIDs only")
+            elif "event_datetime" in match_stage:
+                # With only date range, use this index
+                hint = "event_datetime_1"
+                print(f"Selected hint for All events: {hint} - Has date range only")
+            else:
+                # Without any filters, MongoDB should choose appropriately
+                hint = None
+                print("No hint selected for All events - letting MongoDB choose optimal index")
+                
+            return hint
+        
+        # For other modes, proceed with existing logic
         # Check if this is a total count query (no status filter)
         is_total_count = not status and "tracking_reference" in str(match_stage)
         
@@ -1684,6 +1766,256 @@ class MongoQueryApp:
         # Add close button
         close_button = ttk.Button(popup, text="Close", command=popup.destroy)
         close_button.pack(pady=10)
+
+    def run_all_events_query(self):
+        """Run a query to count events by type and display the results"""
+        try:
+            # Reset previous active button style
+            if self.active_button:
+                self.active_button.configure(style="Status.TButton")
+            
+            # Set the All events button as active
+            self.all_events_btn.configure(style="Active.TButton")
+            self.active_button = self.all_events_btn
+            
+            # Get the actual collection name from the display name
+            collection_name = COLLECTIONS[self.collection_var.get()]
+            collection = self.db[collection_name]
+            
+            # Build base query for filtering
+            match_stage = {}
+            
+            # Add TPID filter
+            selected_tpids = [tpid for tpid, var in self.tpid_vars.items() if var.get()]
+            if selected_tpids:
+                match_stage["tpid"] = {"$in": selected_tpids}
+            
+            # Add date range filter if enabled
+            if self.use_date_range.get():
+                from_date = datetime.combine(self.from_date.get_date(), datetime.min.time())
+                to_date = datetime.combine(self.to_date.get_date(), datetime.max.time())
+                
+                if self.current_db == "nzpost_summary_append":
+                    match_stage["timestamp"] = {"$gte": from_date, "$lte": to_date}
+                else:
+                    match_stage["event_datetime"] = {"$gte": from_date, "$lte": to_date}
+            
+            # Print query details to console
+            print("\n=== All Events Query Details ===")
+            print(f"Database: {self.current_db}")
+            print(f"Collection: {collection_name}")
+            print(f"Selected TPIDs: {selected_tpids}")
+            if self.use_date_range.get():
+                print(f"Date Range: {self.from_date.get_date()} to {self.to_date.get_date()}")
+            
+            # Build aggregation pipeline for counting events by type
+            pipeline = [
+                {"$match": match_stage},
+                {"$group": {
+                    "_id": {"edifact_code": "$edifact_code", "event_description": "$event_description"},
+                    "count": {"$sum": 1}
+                }},
+                {"$project": {
+                    "_id": 0,
+                    "edifact_code": "$_id.edifact_code",
+                    "event_description": "$_id.event_description", 
+                    "count": 1
+                }},
+                {"$sort": {"edifact_code": 1}}
+            ]
+            
+            # Get optimal index hint
+            hint = self.get_optimal_hint(match_stage)
+            
+            # Execute aggregation pipeline with timing
+            start_time = time.time()
+            if self.current_db == "nzpost_summary_append":
+                result, response_time = self.run_optimized_time_series_query(
+                    collection, pipeline, hint, 1200000
+                )
+            else:
+                result = list(collection.aggregate(
+                    pipeline,
+                    allowDiskUse=True,
+                    hint=hint
+                ))
+                end_time = time.time()
+                response_time = (end_time - start_time) * 1000
+            
+            # Total count of all events
+            total_count = sum(item["count"] for item in result)
+            
+            # Update the count display
+            self.count_label.config(text=f"Count: {total_count:,}")
+            self.time_label.config(text=f"Response Time: {response_time:.2f}ms")
+            
+            # Also count total parcels (distinct tracking references)
+            parcels_pipeline = [
+                {"$match": match_stage},
+                {"$group": {
+                    "_id": None,
+                    "distinct_parcels": {"$addToSet": "$tracking_reference"}
+                }},
+                {"$project": {
+                    "_id": 0,
+                    "count": {"$size": "$distinct_parcels"}
+                }}
+            ]
+            
+            # Execute parcels count pipeline
+            if self.current_db == "nzpost_summary_append":
+                parcels_result, _ = self.run_optimized_time_series_query(
+                    collection, parcels_pipeline, hint, 1200000
+                )
+            else:
+                parcels_result = list(collection.aggregate(
+                    parcels_pipeline,
+                    allowDiskUse=True,
+                    hint=hint
+                ))
+            
+            # Get parcels count from result
+            parcels_count = parcels_result[0]["count"] if parcels_result else 0
+            self.parcels_label.config(text=f"Parcels: {parcels_count:,}")
+            
+            # Create summary table of events in the results area
+            self.display_event_summary(result, response_time)
+            
+        except Exception as e:
+            error_msg = f"Error executing all events query: {str(e)}"
+            print(f"\n=== Query Error ===\n{error_msg}\n")
+            messagebox.showerror("Query Error", error_msg)
+            self.count_label.config(text="Count: Error")
+            self.time_label.config(text="Response Time: Error")
+
+    def display_event_summary(self, results, response_time):
+        """Display summary of all events in the results area"""
+        # Clear existing content in results_right
+        for widget in self.results_right.winfo_children():
+            widget.destroy()
+        
+        # Create a table-like display for the results
+        self.query_label = ttk.Label(self.results_right, text="Event Count Summary:",
+                                   font=("Arial", 12, "bold"),
+                                   justify=tk.LEFT)
+        self.query_label.pack(anchor=tk.W, pady=(0, 10))
+        
+        # Create frame for the table
+        table_frame = ttk.Frame(self.results_right)
+        table_frame.pack(fill=tk.X, expand=True)
+        
+        # Add headers
+        ttk.Label(table_frame, text="Edifact Code", font=("Arial", 10, "bold"), width=15).grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(table_frame, text="Event Description", font=("Arial", 10, "bold"), width=20).grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(table_frame, text="Count", font=("Arial", 10, "bold"), width=15).grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(table_frame, text="Percentage", font=("Arial", 10, "bold"), width=15).grid(row=0, column=3, padx=5, pady=5, sticky=tk.W)
+        
+        # Add separator
+        separator = ttk.Separator(table_frame, orient="horizontal")
+        separator.grid(row=1, column=0, columnspan=4, sticky=tk.EW, pady=5)
+        
+        # Calculate total for percentage
+        total_count = sum(item["count"] for item in results)
+        
+        # Add data rows
+        for i, item in enumerate(results):
+            row = i + 2  # Start from row 2 due to header and separator
+            
+            # Calculate percentage
+            percentage = (item["count"] / total_count * 100) if total_count > 0 else 0
+            
+            ttk.Label(table_frame, text=str(item["edifact_code"])).grid(row=row, column=0, padx=5, pady=2, sticky=tk.W)
+            ttk.Label(table_frame, text=item["event_description"]).grid(row=row, column=1, padx=5, pady=2, sticky=tk.W)
+            ttk.Label(table_frame, text=f"{item['count']:,}").grid(row=row, column=2, padx=5, pady=2, sticky=tk.W)
+            ttk.Label(table_frame, text=f"{percentage:.2f}%").grid(row=row, column=3, padx=5, pady=2, sticky=tk.W)
+        
+        # Add pipeline details button
+        self.pipeline_btn = ttk.Button(
+            self.results_right,
+            text="Show Pipeline Details",
+            command=self.show_pipeline
+        )
+        self.pipeline_btn.pack(anchor=tk.W, pady=10)
+
+    def show_all_events_query_details(self, event):
+        """Show query details for the All events button in a tooltip"""
+        try:
+            # First clean up any existing tooltips
+            self.hide_tooltip()
+            
+            details = []
+            details.append(f"Collection: {self.collection_var.get()}")
+            
+            selected_tpids = [tpid for tpid, var in self.tpid_vars.items() if var.get()]
+            if selected_tpids:
+                details.append(f"\nSelected TPIDs: {', '.join(map(str, selected_tpids))}")
+            else:
+                details.append("\nNo TPIDs selected")
+            
+            details.append("\nQuery: Count of all event types")
+            
+            if self.use_date_range.get():
+                details.append(f"\nDate Range:")
+                details.append(f"From: {self.from_date.get_date()}")
+                details.append(f"To: {self.to_date.get_date()}")
+            
+            # Build sample query to show
+            match_stage = {}
+            if selected_tpids:
+                match_stage["tpid"] = {"$in": selected_tpids}
+                
+            if self.use_date_range.get():
+                from_date = datetime.combine(self.from_date.get_date(), datetime.min.time())
+                to_date = datetime.combine(self.to_date.get_date(), datetime.max.time())
+                
+                if self.current_db == "nzpost_summary_append":
+                    match_stage["timestamp"] = {"$gte": from_date, "$lte": to_date}
+                else:
+                    match_stage["event_datetime"] = {"$gte": from_date, "$lte": to_date}
+            
+            # Aggregation pipeline for counting events by type
+            pipeline = [
+                {"$match": match_stage},
+                {"$group": {
+                    "_id": {"edifact_code": "$edifact_code", "event_description": "$event_description"},
+                    "count": {"$sum": 1}
+                }},
+                {"$project": {
+                    "_id": 0,
+                    "edifact_code": "$_id.edifact_code",
+                    "event_description": "$_id.event_description", 
+                    "count": 1
+                }},
+                {"$sort": {"edifact_code": 1}}
+            ]
+            
+            # Get the appropriate index hint
+            hint = self.get_optimal_hint(match_stage)
+            
+            details.append(f"\nAggregation Pipeline:")
+            details.append(json.dumps(pipeline, indent=2, default=str))
+            details.append(f"\nUsing Index Hint: {hint}")
+            details.append("\nThis query runs completely on the MongoDB server")
+            
+            # Create tooltip window
+            tooltip = tk.Toplevel()
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
+            
+            # Add label with details
+            label = ttk.Label(tooltip, text="\n".join(details), justify=tk.LEFT,
+                             background="#ffffe0", relief=tk.SOLID, borderwidth=1)
+            label.pack()
+            
+            # Store tooltip reference
+            self.current_tooltip = tooltip
+            
+            # Schedule tooltip destruction
+            self.tooltip_after_id = self.root.after(5000, lambda: self.hide_tooltip())
+            
+        except Exception as e:
+            print(f"Error showing all events query details: {str(e)}")
+            self.hide_tooltip()
 
 if __name__ == "__main__":
     root = tk.Tk()
