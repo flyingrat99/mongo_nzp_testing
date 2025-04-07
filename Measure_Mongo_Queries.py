@@ -360,6 +360,11 @@ class MongoQueryApp:
                                      justify=tk.LEFT)
         self.parcels_label.pack(anchor=tk.W, pady=2)
         
+        # Add percentage label
+        self.percentage_label = ttk.Label(self.results_left, text="Percentage: 0.00%",
+                                      justify=tk.LEFT)
+        self.percentage_label.pack(anchor=tk.W, pady=2)
+        
         # Query details on the right
         self.results_right = ttk.Frame(self.results_container)
         self.results_right.pack(side=tk.LEFT, padx=20, fill=tk.X, expand=True)
@@ -599,6 +604,21 @@ class MongoQueryApp:
     def run_status_query(self, status):
         """Run a query for the selected status and update the display"""
         try:
+            # Clear any existing event summary display from "All events"
+            for widget in self.results_right.winfo_children():
+                widget.destroy()
+            
+            # Reset labels
+            self.count_label.config(text="Count: 0")
+            self.time_label.config(text="Response Time: 0ms")
+            self.parcels_label.config(text="Parcels: 0")
+            self.percentage_label.config(text="Percentage: 0.00%")
+            
+            # Recreate the query label widget since we just destroyed it
+            self.query_label = ttk.Label(self.results_right, text="Aggregation Pipeline Query:",
+                                       justify=tk.LEFT, wraplength=600)
+            self.query_label.pack(anchor=tk.W)
+            
             # Get the actual collection name from the display name
             collection_name = COLLECTIONS[self.collection_var.get()]
             collection = self.db[collection_name]  # Use the actual collection name
@@ -743,6 +763,11 @@ class MongoQueryApp:
             
             self.count_label.config(text=f"Count: {count:,}")
             self.time_label.config(text=f"Response Time: {response_time:.2f}ms")
+            
+            # Calculate and display percentage
+            if total_parcels > 0:
+                percentage = (count / total_parcels) * 100
+                self.percentage_label.config(text=f"Percentage: {percentage:.2f}%")
             
             # Remove old pipeline button if it exists
             if hasattr(self, 'pipeline_btn'):
