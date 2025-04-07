@@ -1443,46 +1443,109 @@ class MongoQueryApp:
             
             # Special handling for "All events" query
             if status == "All events":
-                # Build the all events pipeline
-                all_events_pipeline = [
-                    {"$match": match_stage},
-                    {"$group": {
-                        "_id": {"edifact_code": "$edifact_code", "event_description": "$event_description"},
-                        "count": {"$sum": 1}
-                    }},
-                    {"$project": {
-                        "_id": 0,
-                        "edifact_code": "$_id.edifact_code",
-                        "event_description": "$_id.event_description", 
-                        "count": 1
-                    }},
-                    {"$sort": {"edifact_code": 1}}
-                ]
-                
                 # Determine the hint being used
                 hint = self.get_optimal_hint(match_stage)
                 
-                details = (
-                    "All Events Summary Query\n"
-                    "----------------------\n"
-                    f"Database: {self.current_db}\n"
-                    f"Collection: {COLLECTIONS[self.collection_var.get()]}\n"
-                    f"Selected TPIDs: {selected_tpids}\n"
-                    f"{date_range_str}\n\n"
-                    "Pipeline:\n"
-                    f"{json.dumps(all_events_pipeline, indent=2, default=str)}\n\n"
-                    f"Using Index Hint: {hint}\n\n"
-                    "Explanation:\n"
-                    "1. Match documents based on TPID and date range filters\n"
-                    "2. Group documents by edifact_code and event_description\n"
-                    "3. Count occurrences of each event type\n"
-                    "4. Project the results in a clean format\n"
-                    "5. Sort by edifact_code for consistent display\n\n"
-                    "Note: This query runs entirely on the MongoDB server using aggregation,\n"
-                    "which is more efficient than retrieving all events and counting them client-side."
-                )
-                
-                text.insert(tk.END, details)
+                if self.current_db == "nzpost_summary_append":
+                    # For time series database, show latest events pipeline
+                    time_series_pipeline = [
+                        {"$match": match_stage},
+                        # Sort by timestamp in descending order and group by tracking reference
+                        {"$sort": {"timestamp": -1}},
+                        {"$group": {
+                            "_id": "$tracking_reference",
+                            "latest_event": {"$first": "$$ROOT"}
+                        }},
+                        # Group by edifact code to get counts
+                        {"$group": {
+                            "_id": {
+                                "edifact_code": "$latest_event.edifact_code",
+                                "event_description": "$latest_event.event_description"
+                            },
+                            "count": {"$sum": 1}
+                        }},
+                        {"$project": {
+                            "_id": 0,
+                            "edifact_code": "$_id.edifact_code",
+                            "event_description": "$_id.event_description",
+                            "count": 1
+                        }},
+                        {"$sort": {"edifact_code": 1}}
+                    ]
+                    
+                    details = (
+                        "Time Series All Events Query\n"
+                        "-------------------------\n"
+                        f"Database: {self.current_db}\n"
+                        f"Collection: {COLLECTIONS[self.collection_var.get()]}\n"
+                        f"Selected TPIDs: {selected_tpids}\n"
+                        f"{date_range_str}\n\n"
+                        "Pipeline (counts most recent events per tracking reference):\n"
+                        f"{json.dumps(time_series_pipeline, indent=2, default=str)}\n\n"
+                        f"Using Index Hint: {hint}\n\n"
+                        "Explanation:\n"
+                        "1. Match documents based on TPID and date range filters\n"
+                        "2. Sort events by timestamp in descending order\n"
+                        "3. Group by tracking reference and keep only the most recent event\n"
+                        "4. Group again by edifact_code and event_description to count occurrences\n"
+                        "5. Project the results in a clean format\n"
+                        "6. Sort by edifact_code for consistent display\n\n"
+                        "Note: For time series data, we first identify the latest event for each\n"
+                        "tracking reference, then count those latest events by type."
+                    )
+                    
+                    text.insert(tk.END, details)
+                    
+                else:
+                    # For standard collections, show both pipelines
+                    events_pipeline = [
+                        {"$match": match_stage},
+                        {"$group": {
+                            "_id": {"edifact_code": "$edifact_code", "event_description": "$event_description"},
+                            "count": {"$sum": 1}
+                        }},
+                        {"$project": {
+                            "_id": 0,
+                            "edifact_code": "$_id.edifact_code",
+                            "event_description": "$_id.event_description",
+                            "count": 1
+                        }},
+                        {"$sort": {"edifact_code": 1}}
+                    ]
+                    
+                    parcels_pipeline = [
+                        {"$match": match_stage},
+                        {"$group": {
+                            "_id": None,  # Using None for null
+                            "distinct_parcels": {"$addToSet": "$tracking_reference"}
+                        }},
+                        {"$project": {
+                            "_id": 0,
+                            "count": {"$size": "$distinct_parcels"}
+                        }}
+                    ]
+                    
+                    details = (
+                        "Standard Collection All Events Query\n"
+                        "--------------------------------\n"
+                        f"Database: {self.current_db}\n"
+                        f"Collection: {COLLECTIONS[self.collection_var.get()]}\n"
+                        f"Selected TPIDs: {selected_tpids}\n"
+                        f"{date_range_str}\n\n"
+                        "Pipeline #1 (counts all events by type):\n"
+                        f"{json.dumps(events_pipeline, indent=2, default=str)}\n\n"
+                        "Pipeline #2 (counts distinct parcels):\n"
+                        f"{json.dumps(parcels_pipeline, indent=2, default=str)}\n\n"
+                        f"Using Index Hint: {hint}\n\n"
+                        "Explanation:\n"
+                        "This query runs in two parts:\n"
+                        "1. First pipeline counts all events by type (edifact code and description)\n"
+                        "2. Second pipeline counts the number of unique tracking references (parcels)\n\n"
+                        "Note: We run two separate queries for optimal performance rather than using\n"
+                        "a more complex single query that might be less efficient."
+                    )
+                    
+                    text.insert(tk.END, details)
                 
             # Format the pipeline details based on database type for regular status queries
             elif self.current_db == "nzpost_summary_append":
@@ -1691,67 +1754,66 @@ class MongoQueryApp:
         details = []
         details.append(f"\n=== Database: {current_db} ===\n")
         
-        for display_name, collection_name in COLLECTIONS.items():
-            details.append(f"\n--- Collection: {collection_name} ({display_name}) ---\n")
-            
-            # Build match stage
-            match_stage = {
-                "tpid": {"$in": test_tpids},
-                "edifact_code": {"$in": test_codes}
-            }
-            
-            # Always add date range for time series collections, or if enabled for regular collections
-            if current_db == "nzpost_summary_append" or self.use_date_range.get():
-                from_date, to_date = collection_date_ranges[collection_name]
-                from_date = datetime.combine(from_date, datetime.min.time())
-                to_date = datetime.combine(to_date, datetime.max.time())
-                
-                if current_db == "nzpost_summary_append":
-                    match_stage["timestamp"] = {
-                        "$gte": from_date,
-                        "$lte": to_date
-                    }
-                    details.append(f"Date Range: {from_date.strftime('%Y-%m-%d')} to {to_date.strftime('%Y-%m-%d')}\n")
-                else:
-                    match_stage["event_datetime"] = {
-                        "$gte": from_date,
-                        "$lte": to_date
-                    }
-                    if self.use_date_range.get():
-                        details.append(f"Date Range: {from_date.strftime('%Y-%m-%d')} to {to_date.strftime('%Y-%m-%d')}\n")
-            
-            # Determine index hint
-            hint = None
+        # Show details for each collection/date range we test
+        for collection_key, date_range in collection_date_ranges.items():
+            # Get the actual collection name
             if current_db == "nzpost_summary_append":
-                if "timestamp" in match_stage:
-                    hint = "tpid_1_timestamp_1"
-                else:
-                    hint = "tpid_1_edifact_code_1"
+                collection_name = "time_series_events"
             else:
-                if "event_datetime" in match_stage:
-                    hint = "tpid_1_edifact_code_1_event_datetime_1"
-                else:
-                    hint = "tpid_1_edifact_code_1"
+                collection_name = f"{current_db}_{collection_key}"
             
-            # Calculate timeout based on collection size for time series
-            if current_db == "nzpost_summary_append":
-                if collection_name == "summary_3_months":
-                    timeout_ms = 1200000  # 20 minutes for 3 months collection
-                elif collection_name == "summary_1_month":
-                    timeout_ms = 1200000   # 20 minutes for 1 month collection
-                elif collection_name == "summary_2_weeks":
-                    timeout_ms = 1200000   # 20 minutes for 2 weeks collection
-                else:
-                    timeout_ms = 1200000   # 20 minutes for 1 week collection
-                details.append(f"Query Timeout: {timeout_ms/1000} seconds\n")
+            # Include collection-specific info
+            details.append(f"Collection: {collection_name}")
+            details.append(f"Date Range: {date_range[0].strftime('%Y-%m-%d')} to {date_range[1].strftime('%Y-%m-%d')}")
+            details.append(f"Test TPIDs: {test_tpids}")
+            details.append(f"Test Status Codes: {test_codes} (Delivered and Attempted Delivery)")
             
-            # Build pipeline
+            # Build the match stage
+            match_stage = {"tpid": {"$in": test_tpids}}
+            
             if current_db == "nzpost_summary_append":
-                # For time series, use $setWindowFields for latest event pipeline
-                setwindow_pipeline = [
-                    # Match TPIDs first to limit dataset
-                    {"$match": {"tpid": {"$in": test_tpids}, "timestamp": {"$gte": from_date, "$lte": to_date}}},
-                    # Use $setWindowFields to find latest event per tracking reference
+                match_stage["timestamp"] = {"$gte": date_range[0], "$lte": date_range[1]}
+            else:
+                match_stage["event_datetime"] = {"$gte": date_range[0], "$lte": date_range[1]}
+            
+            # Get the optimal hint
+            hint = self.get_optimal_hint(match_stage)
+            
+            # Show different pipelines based on collection type
+            if current_db == "nzpost_summary_append":
+                # For time series database, show the SetWindowFields pipeline
+                details.append("\nTime Series Collection Test Pipeline:")
+                details.append("This test measures:")
+                details.append("1. Count of all events by type for the latest event per tracking reference")
+                details.append("2. Count of parcels with specific latest status codes")
+                
+                # All events pipeline for time series
+                all_events_pipeline = [
+                    {"$match": match_stage},
+                    {"$sort": {"timestamp": -1}},
+                    {"$group": {
+                        "_id": "$tracking_reference",
+                        "latest_event": {"$first": "$$ROOT"}
+                    }},
+                    {"$group": {
+                        "_id": {
+                            "edifact_code": "$latest_event.edifact_code",
+                            "event_description": "$latest_event.event_description"
+                        },
+                        "count": {"$sum": 1}
+                    }},
+                    {"$project": {
+                        "_id": 0,
+                        "edifact_code": "$_id.edifact_code",
+                        "event_description": "$_id.event_description",
+                        "count": 1
+                    }},
+                    {"$sort": {"edifact_code": 1}}
+                ]
+                
+                # Specific status pipeline for time series
+                status_pipeline = [
+                    {"$match": match_stage},
                     {"$setWindowFields": {
                         "partitionBy": "$tracking_reference",
                         "sortBy": {"timestamp": -1},
@@ -1762,33 +1824,69 @@ class MongoQueryApp:
                             }
                         }
                     }},
-                    # Keep only the first document for each tracking reference
                     {"$match": {"is_latest.edifact_code": {"$in": test_codes}}},
-                    # Count total unique tracking references
                     {"$count": "total"}
                 ]
                 
-                details.append("Pipeline (counts parcels where LATEST status is Delivered/Attempted):")
-                details.append(json.dumps(setwindow_pipeline, indent=2, default=str))
-                details.append(f"\nUsing Index Hint: {hint}")
+                details.append("\nAll Events Pipeline (counts most recent events per tracking reference):")
+                details.append(json.dumps(all_events_pipeline, indent=2, default=str))
                 
-                details.append("\nExplanation:")
-                details.append("1. First we find all events for the specified TPIDs within the date range")
-                details.append("2. Then we use $setWindowFields to efficiently find the latest event for each parcel")
-                details.append("3. Filter to include only parcels whose latest status is Delivered or Attempted")
-                details.append("4. Count the resulting unique parcels")
-                details.append("\nNote: $setWindowFields is MongoDB's optimized operator for time series data analysis")
+                details.append("\nStatus Query Pipeline (counts parcels with specific latest status):")
+                details.append(json.dumps(status_pipeline, indent=2, default=str))
+                
             else:
-                # Standard collections just have one pipeline
-                pipeline = [
+                # For standard collections, show both pipelines
+                details.append("\nStandard Collection Test Pipeline:")
+                details.append("This test measures:")
+                details.append("1. Count of all events grouped by type")
+                details.append("2. Count of unique parcels")
+                details.append("3. Count of events with specific status codes")
+                
+                # All events pipeline for standard collections
+                all_events_pipeline = [
                     {"$match": match_stage},
+                    {"$group": {
+                        "_id": {"edifact_code": "$edifact_code", "event_description": "$event_description"},
+                        "count": {"$sum": 1}
+                    }},
+                    {"$project": {
+                        "_id": 0,
+                        "edifact_code": "$_id.edifact_code",
+                        "event_description": "$_id.event_description",
+                        "count": 1
+                    }},
+                    {"$sort": {"edifact_code": 1}}
+                ]
+                
+                # Unique parcels pipeline
+                parcels_pipeline = [
+                    {"$match": match_stage},
+                    {"$group": {
+                        "_id": None,  # Using None for null
+                        "distinct_parcels": {"$addToSet": "$tracking_reference"}
+                    }},
+                    {"$project": {
+                        "_id": 0,
+                        "count": {"$size": "$distinct_parcels"}
+                    }}
+                ]
+                
+                # Specific status pipeline
+                status_pipeline = [
+                    {"$match": {**match_stage, "edifact_code": {"$in": test_codes}}},
                     {"$count": "total"}
                 ]
                 
-                details.append("Pipeline:")
-                details.append(json.dumps(pipeline, indent=2, default=str))
-                details.append(f"\nUsing Index Hint: {hint}")
+                details.append("\nAll Events Pipeline (counts events by type):")
+                details.append(json.dumps(all_events_pipeline, indent=2, default=str))
+                
+                details.append("\nUnique Parcels Pipeline (counts distinct tracking references):")
+                details.append(json.dumps(parcels_pipeline, indent=2, default=str))
+                
+                details.append("\nStatus Query Pipeline (counts events with specific status):")
+                details.append(json.dumps(status_pipeline, indent=2, default=str))
             
+            details.append(f"\nUsing Index Hint: {hint}")
             details.append("-" * 50)
         
         # Insert all details into text widget
@@ -1883,7 +1981,7 @@ class MongoQueryApp:
                 parcels_count = total_count  # Each parcel appears exactly once
                 
             else:
-                # Standard pipeline for non-time series collections
+                # Standard pipeline for regular collections (non-time series)
                 pipeline = [
                     {"$match": match_stage},
                     {"$group": {
@@ -1893,27 +1991,30 @@ class MongoQueryApp:
                     {"$project": {
                         "_id": 0,
                         "edifact_code": "$_id.edifact_code",
-                        "event_description": "$_id.event_description", 
+                        "event_description": "$_id.event_description",
                         "count": 1
                     }},
                     {"$sort": {"edifact_code": 1}}
                 ]
                 
+                # Execute the pipeline
                 result = list(collection.aggregate(
                     pipeline,
                     allowDiskUse=True,
                     hint=hint
                 ))
+                
                 end_time = time.time()
                 response_time = (end_time - start_time) * 1000
                 
+                # Calculate total count from results
                 total_count = sum(item["count"] for item in result)
                 
-                # For standard collections, count distinct tracking references
+                # For standard collections, count distinct tracking references efficiently
                 parcels_pipeline = [
                     {"$match": match_stage},
                     {"$group": {
-                        "_id": None,
+                        "_id": None,  # Use None instead of null
                         "distinct_parcels": {"$addToSet": "$tracking_reference"}
                     }},
                     {"$project": {
@@ -1970,7 +2071,7 @@ class MongoQueryApp:
             if self.current_db == "nzpost_summary_append":
                 details.append("\nQuery: Count of most recent event types per tracking reference")
             else:
-                details.append("\nQuery: Count of all event types")
+                details.append("\nQuery: Count of all event types with distinct parcel count")
             
             if self.use_date_range.get():
                 details.append(f"\nDate Range:")
@@ -2015,10 +2116,10 @@ class MongoQueryApp:
                     }},
                     {"$sort": {"edifact_code": 1}}
                 ]
-                
                 details.append("\nPipeline (counts most recent events per tracking reference):")
             else:
-                pipeline = [
+                # Show both pipelines for standard collections
+                event_pipeline = [
                     {"$match": match_stage},
                     {"$group": {
                         "_id": {"edifact_code": "$edifact_code", "event_description": "$event_description"},
@@ -2027,12 +2128,36 @@ class MongoQueryApp:
                     {"$project": {
                         "_id": 0,
                         "edifact_code": "$_id.edifact_code",
-                        "event_description": "$_id.event_description", 
+                        "event_description": "$_id.event_description",
                         "count": 1
                     }},
                     {"$sort": {"edifact_code": 1}}
                 ]
-                details.append("\nPipeline (counts all events):")
+                details.append("\nPipeline #1 (counts all events by type):")
+                details.append(json.dumps(event_pipeline, indent=2, default=str))
+                
+                parcel_pipeline = [
+                    {"$match": match_stage},
+                    {"$group": {
+                        "_id": None,  # Use None instead of null
+                        "distinct_parcels": {"$addToSet": "$tracking_reference"}
+                    }},
+                    {"$project": {
+                        "_id": 0,
+                        "count": {"$size": "$distinct_parcels"}
+                    }}
+                ]
+                details.append("\nPipeline #2 (counts distinct parcels):")
+                details.append(json.dumps(parcel_pipeline, indent=2, default=str))
+                
+                # Get the appropriate index hint
+                hint = self.get_optimal_hint(match_stage)
+                details.append(f"\nUsing Index Hint: {hint}")
+                
+                details.append("\nNote: We run two separate queries for optimal performance:")
+                details.append("1. First to count events by type")
+                details.append("2. Second to count unique tracking references (parcels)")
+                return
             
             details.append(json.dumps(pipeline, indent=2, default=str))
             
