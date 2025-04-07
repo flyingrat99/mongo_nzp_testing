@@ -656,6 +656,15 @@ class MongoQueryApp:
             
             # Use optimized query for time series collections
             if self.current_db == "nzpost_summary_append":
+                # For time series, we need to count unique tracking references
+                pipeline_total = [
+                    {"$match": tpid_query},
+                    # Group by tracking reference to get unique count
+                    {"$group": {
+                        "_id": "$tracking_reference"
+                    }},
+                    {"$count": "total"}
+                ]
                 total_result, total_time = self.run_optimized_time_series_query(
                     collection, pipeline_total, hint_for_total, 1200000
                 )
@@ -686,23 +695,18 @@ class MongoQueryApp:
                 if "tpid" in match_stage:
                     tpid_filter = {"tpid": match_stage["tpid"]}
                 
-                # Build pipeline using $setWindowFields
+                # Build pipeline using $setWindowFields for latest events
                 pipeline = [
                     # Match by TPIDs and date range first if specified
                     {"$match": {**tpid_filter, **date_filter}},
-                    # Use $setWindowFields to efficiently find latest event per tracking reference
-                    {"$setWindowFields": {
-                        "partitionBy": "$tracking_reference",
-                        "sortBy": {"timestamp": -1},
-                        "output": {
-                            "is_latest": {
-                                "$first": "$$ROOT",
-                                "window": {"documents": [0, 0]}
-                            }
-                        }
+                    # Group by tracking reference and get the latest event
+                    {"$sort": {"timestamp": -1}},
+                    {"$group": {
+                        "_id": "$tracking_reference",
+                        "latest_event": {"$first": "$$ROOT"}
                     }},
-                    # Keep only the first document for each tracking reference
-                    {"$match": {"is_latest.edifact_code": EDIFACT_CODES[status]}},
+                    # Match the latest event's edifact code
+                    {"$match": {"latest_event.edifact_code": EDIFACT_CODES[status]}},
                     # Count total unique tracking references
                     {"$count": "total"}
                 ]
@@ -1322,9 +1326,12 @@ class MongoQueryApp:
         # Connect to the new database
         self.db = self.client[self.current_db]
         
-        # Update the query if there's an active status
+        # Update the query based on active button
         if self.active_button:
-            self.run_status_query(self.active_button.cget("text"))
+            if self.active_button == self.all_events_btn:
+                self.run_all_events_query()
+            else:
+                self.run_status_query(self.active_button.cget("text"))
             
         # Enforce date range for time series database
         if self.current_db == "nzpost_summary_append":
@@ -1833,32 +1840,65 @@ class MongoQueryApp:
             if self.use_date_range.get():
                 print(f"Date Range: {self.from_date.get_date()} to {self.to_date.get_date()}")
             
-            # Build aggregation pipeline for counting events by type
-            pipeline = [
-                {"$match": match_stage},
-                {"$group": {
-                    "_id": {"edifact_code": "$edifact_code", "event_description": "$event_description"},
-                    "count": {"$sum": 1}
-                }},
-                {"$project": {
-                    "_id": 0,
-                    "edifact_code": "$_id.edifact_code",
-                    "event_description": "$_id.event_description", 
-                    "count": 1
-                }},
-                {"$sort": {"edifact_code": 1}}
-            ]
-            
             # Get optimal index hint
             hint = self.get_optimal_hint(match_stage)
             
             # Execute aggregation pipeline with timing
             start_time = time.time()
+            
             if self.current_db == "nzpost_summary_append":
+                # For time series, first get latest event per tracking reference
+                pipeline = [
+                    {"$match": match_stage},
+                    # Sort by timestamp in descending order and group by tracking reference
+                    {"$sort": {"timestamp": -1}},
+                    {"$group": {
+                        "_id": "$tracking_reference",
+                        "latest_event": {"$first": "$$ROOT"}
+                    }},
+                    # Group by edifact code to get counts
+                    {"$group": {
+                        "_id": {
+                            "edifact_code": "$latest_event.edifact_code",
+                            "event_description": "$latest_event.event_description"
+                        },
+                        "count": {"$sum": 1}
+                    }},
+                    {"$project": {
+                        "_id": 0,
+                        "edifact_code": "$_id.edifact_code",
+                        "event_description": "$_id.event_description",
+                        "count": 1
+                    }},
+                    {"$sort": {"edifact_code": 1}}
+                ]
+                
                 result, response_time = self.run_optimized_time_series_query(
                     collection, pipeline, hint, 1200000
                 )
+                
+                # For time series, total parcels is the sum of all counts since each tracking reference
+                # is counted exactly once in its latest status
+                total_count = sum(item["count"] for item in result)
+                parcels_count = total_count  # Each parcel appears exactly once
+                
             else:
+                # Standard pipeline for non-time series collections
+                pipeline = [
+                    {"$match": match_stage},
+                    {"$group": {
+                        "_id": {"edifact_code": "$edifact_code", "event_description": "$event_description"},
+                        "count": {"$sum": 1}
+                    }},
+                    {"$project": {
+                        "_id": 0,
+                        "edifact_code": "$_id.edifact_code",
+                        "event_description": "$_id.event_description", 
+                        "count": 1
+                    }},
+                    {"$sort": {"edifact_code": 1}}
+                ]
+                
                 result = list(collection.aggregate(
                     pipeline,
                     allowDiskUse=True,
@@ -1866,42 +1906,41 @@ class MongoQueryApp:
                 ))
                 end_time = time.time()
                 response_time = (end_time - start_time) * 1000
-            
-            # Total count of all events
-            total_count = sum(item["count"] for item in result)
-            
-            # Update the count display
-            self.count_label.config(text=f"Count: {total_count:,}")
-            self.time_label.config(text=f"Response Time: {response_time:.2f}ms")
-            
-            # Also count total parcels (distinct tracking references)
-            parcels_pipeline = [
-                {"$match": match_stage},
-                {"$group": {
-                    "_id": None,
-                    "distinct_parcels": {"$addToSet": "$tracking_reference"}
-                }},
-                {"$project": {
-                    "_id": 0,
-                    "count": {"$size": "$distinct_parcels"}
-                }}
-            ]
-            
-            # Execute parcels count pipeline
-            if self.current_db == "nzpost_summary_append":
-                parcels_result, _ = self.run_optimized_time_series_query(
-                    collection, parcels_pipeline, hint, 1200000
-                )
-            else:
+                
+                total_count = sum(item["count"] for item in result)
+                
+                # For standard collections, count distinct tracking references
+                parcels_pipeline = [
+                    {"$match": match_stage},
+                    {"$group": {
+                        "_id": None,
+                        "distinct_parcels": {"$addToSet": "$tracking_reference"}
+                    }},
+                    {"$project": {
+                        "_id": 0,
+                        "count": {"$size": "$distinct_parcels"}
+                    }}
+                ]
+                
+                # Execute parcels count pipeline
                 parcels_result = list(collection.aggregate(
                     parcels_pipeline,
                     allowDiskUse=True,
                     hint=hint
                 ))
+                parcels_count = parcels_result[0]["count"] if parcels_result else 0
             
-            # Get parcels count from result
-            parcels_count = parcels_result[0]["count"] if parcels_result else 0
+            # Update display labels
+            self.count_label.config(text=f"Count: {total_count:,}")
+            self.time_label.config(text=f"Response Time: {response_time:.2f}ms")
             self.parcels_label.config(text=f"Parcels: {parcels_count:,}")
+            
+            # For time series, percentage should be relative to total unique tracking references
+            # For standard collections, percentage is relative to total events
+            denominator = parcels_count if self.current_db == "nzpost_summary_append" else total_count
+            if denominator > 0:
+                percentage = 100.0  # For time series, this will be 100% since we're showing all latest statuses
+                self.percentage_label.config(text=f"Percentage: {percentage:.2f}%")
             
             # Create summary table of events in the results area
             self.display_event_summary(result, response_time)
@@ -1912,55 +1951,6 @@ class MongoQueryApp:
             messagebox.showerror("Query Error", error_msg)
             self.count_label.config(text="Count: Error")
             self.time_label.config(text="Response Time: Error")
-
-    def display_event_summary(self, results, response_time):
-        """Display summary of all events in the results area"""
-        # Clear existing content in results_right
-        for widget in self.results_right.winfo_children():
-            widget.destroy()
-        
-        # Create a table-like display for the results
-        self.query_label = ttk.Label(self.results_right, text="Event Count Summary:",
-                                   font=("Arial", 12, "bold"),
-                                   justify=tk.LEFT)
-        self.query_label.pack(anchor=tk.W, pady=(0, 10))
-        
-        # Create frame for the table
-        table_frame = ttk.Frame(self.results_right)
-        table_frame.pack(fill=tk.X, expand=True)
-        
-        # Add headers
-        ttk.Label(table_frame, text="Edifact Code", font=("Arial", 10, "bold"), width=15).grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
-        ttk.Label(table_frame, text="Event Description", font=("Arial", 10, "bold"), width=20).grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
-        ttk.Label(table_frame, text="Count", font=("Arial", 10, "bold"), width=15).grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
-        ttk.Label(table_frame, text="Percentage", font=("Arial", 10, "bold"), width=15).grid(row=0, column=3, padx=5, pady=5, sticky=tk.W)
-        
-        # Add separator
-        separator = ttk.Separator(table_frame, orient="horizontal")
-        separator.grid(row=1, column=0, columnspan=4, sticky=tk.EW, pady=5)
-        
-        # Calculate total for percentage
-        total_count = sum(item["count"] for item in results)
-        
-        # Add data rows
-        for i, item in enumerate(results):
-            row = i + 2  # Start from row 2 due to header and separator
-            
-            # Calculate percentage
-            percentage = (item["count"] / total_count * 100) if total_count > 0 else 0
-            
-            ttk.Label(table_frame, text=str(item["edifact_code"])).grid(row=row, column=0, padx=5, pady=2, sticky=tk.W)
-            ttk.Label(table_frame, text=item["event_description"]).grid(row=row, column=1, padx=5, pady=2, sticky=tk.W)
-            ttk.Label(table_frame, text=f"{item['count']:,}").grid(row=row, column=2, padx=5, pady=2, sticky=tk.W)
-            ttk.Label(table_frame, text=f"{percentage:.2f}%").grid(row=row, column=3, padx=5, pady=2, sticky=tk.W)
-        
-        # Add pipeline details button
-        self.pipeline_btn = ttk.Button(
-            self.results_right,
-            text="Show Pipeline Details",
-            command=self.show_pipeline
-        )
-        self.pipeline_btn.pack(anchor=tk.W, pady=10)
 
     def show_all_events_query_details(self, event):
         """Show query details for the All events button in a tooltip"""
@@ -1977,7 +1967,10 @@ class MongoQueryApp:
             else:
                 details.append("\nNo TPIDs selected")
             
-            details.append("\nQuery: Count of all event types")
+            if self.current_db == "nzpost_summary_append":
+                details.append("\nQuery: Count of most recent event types per tracking reference")
+            else:
+                details.append("\nQuery: Count of all event types")
             
             if self.use_date_range.get():
                 details.append(f"\nDate Range:")
@@ -1998,29 +1991,58 @@ class MongoQueryApp:
                 else:
                     match_stage["event_datetime"] = {"$gte": from_date, "$lte": to_date}
             
-            # Aggregation pipeline for counting events by type
-            pipeline = [
-                {"$match": match_stage},
-                {"$group": {
-                    "_id": {"edifact_code": "$edifact_code", "event_description": "$event_description"},
-                    "count": {"$sum": 1}
-                }},
-                {"$project": {
-                    "_id": 0,
-                    "edifact_code": "$_id.edifact_code",
-                    "event_description": "$_id.event_description", 
-                    "count": 1
-                }},
-                {"$sort": {"edifact_code": 1}}
-            ]
+            # Build pipeline based on database type
+            if self.current_db == "nzpost_summary_append":
+                pipeline = [
+                    {"$match": match_stage},
+                    {"$sort": {"timestamp": -1}},
+                    {"$group": {
+                        "_id": "$tracking_reference",
+                        "latest_event": {"$first": "$$ROOT"}
+                    }},
+                    {"$group": {
+                        "_id": {
+                            "edifact_code": "$latest_event.edifact_code",
+                            "event_description": "$latest_event.event_description"
+                        },
+                        "count": {"$sum": 1}
+                    }},
+                    {"$project": {
+                        "_id": 0,
+                        "edifact_code": "$_id.edifact_code",
+                        "event_description": "$_id.event_description",
+                        "count": 1
+                    }},
+                    {"$sort": {"edifact_code": 1}}
+                ]
+                
+                details.append("\nPipeline (counts most recent events per tracking reference):")
+            else:
+                pipeline = [
+                    {"$match": match_stage},
+                    {"$group": {
+                        "_id": {"edifact_code": "$edifact_code", "event_description": "$event_description"},
+                        "count": {"$sum": 1}
+                    }},
+                    {"$project": {
+                        "_id": 0,
+                        "edifact_code": "$_id.edifact_code",
+                        "event_description": "$_id.event_description", 
+                        "count": 1
+                    }},
+                    {"$sort": {"edifact_code": 1}}
+                ]
+                details.append("\nPipeline (counts all events):")
+            
+            details.append(json.dumps(pipeline, indent=2, default=str))
             
             # Get the appropriate index hint
             hint = self.get_optimal_hint(match_stage)
-            
-            details.append(f"\nAggregation Pipeline:")
-            details.append(json.dumps(pipeline, indent=2, default=str))
             details.append(f"\nUsing Index Hint: {hint}")
-            details.append("\nThis query runs completely on the MongoDB server")
+            
+            if self.current_db == "nzpost_summary_append":
+                details.append("\nNote: For time series data, we first get the latest event")
+                details.append("for each tracking reference before counting by status.")
             
             # Create tooltip window
             tooltip = tk.Toplevel()
@@ -2041,6 +2063,58 @@ class MongoQueryApp:
         except Exception as e:
             print(f"Error showing all events query details: {str(e)}")
             self.hide_tooltip()
+
+    def display_event_summary(self, result, response_time):
+        """Display a summary table of events in the results area"""
+        try:
+            # Clear existing widgets in results_right
+            for widget in self.results_right.winfo_children():
+                widget.destroy()
+            
+            # Create a frame for the summary table
+            summary_frame = ttk.Frame(self.results_right)
+            summary_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+            
+            # Add headers
+            ttk.Label(summary_frame, text="Edifact Code", font=("Arial", 10, "bold")).grid(row=0, column=0, padx=5, pady=5)
+            ttk.Label(summary_frame, text="Description", font=("Arial", 10, "bold")).grid(row=0, column=1, padx=5, pady=5)
+            ttk.Label(summary_frame, text="Count", font=("Arial", 10, "bold")).grid(row=0, column=2, padx=5, pady=5)
+            ttk.Label(summary_frame, text="Percentage", font=("Arial", 10, "bold")).grid(row=0, column=3, padx=5, pady=5)
+            
+            # Calculate total for percentage
+            total = sum(item["count"] for item in result)
+            
+            # Add data rows
+            for i, item in enumerate(result, 1):
+                ttk.Label(summary_frame, text=str(item["edifact_code"])).grid(row=i, column=0, padx=5, pady=2)
+                ttk.Label(summary_frame, text=item["event_description"]).grid(row=i, column=1, padx=5, pady=2)
+                ttk.Label(summary_frame, text=f"{item['count']:,}").grid(row=i, column=2, padx=5, pady=2)
+                
+                # For time series database, each tracking reference appears exactly once in its latest status
+                # So percentages should sum to 100%
+                if self.current_db == "nzpost_summary_append":
+                    percentage = (item["count"] / total * 100)
+                else:
+                    # For standard collections, show percentage of total events
+                    percentage = (item["count"] / total * 100) if total > 0 else 0
+                
+                ttk.Label(summary_frame, text=f"{percentage:.2f}%").grid(row=i, column=3, padx=5, pady=2)
+            
+            # Add separator
+            ttk.Separator(self.results_right, orient='horizontal').pack(fill=tk.X, pady=10)
+            
+            # Add pipeline button
+            self.pipeline_btn = ttk.Button(
+                self.results_right,
+                text="Show Pipeline Details",
+                command=self.show_pipeline
+            )
+            self.pipeline_btn.pack(anchor=tk.W, pady=5)
+            
+        except Exception as e:
+            error_msg = f"Error displaying event summary: {str(e)}"
+            print(f"\n=== Display Error ===\n{error_msg}\n")
+            messagebox.showerror("Display Error", error_msg)
 
 if __name__ == "__main__":
     root = tk.Tk()
