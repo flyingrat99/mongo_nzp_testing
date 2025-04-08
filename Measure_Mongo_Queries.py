@@ -1497,32 +1497,19 @@ class MongoQueryApp:
                     text.insert(tk.END, details)
                     
                 else:
-                    # For standard collections, show both pipelines
+                    # For standard collections, show simplified pipeline
                     events_pipeline = [
                         {"$match": match_stage},
                         {"$group": {
-                            "_id": {"edifact_code": "$edifact_code", "event_description": "$event_description"},
+                            "_id": "$edifact_code",
                             "count": {"$sum": 1}
                         }},
                         {"$project": {
                             "_id": 0,
-                            "edifact_code": "$_id.edifact_code",
-                            "event_description": "$_id.event_description",
+                            "edifact_code": "$_id",
                             "count": 1
                         }},
                         {"$sort": {"edifact_code": 1}}
-                    ]
-                    
-                    parcels_pipeline = [
-                        {"$match": match_stage},
-                        {"$group": {
-                            "_id": None,  # Using None for null
-                            "distinct_parcels": {"$addToSet": "$tracking_reference"}
-                        }},
-                        {"$project": {
-                            "_id": 0,
-                            "count": {"$size": "$distinct_parcels"}
-                        }}
                     ]
                     
                     details = (
@@ -1532,17 +1519,17 @@ class MongoQueryApp:
                         f"Collection: {COLLECTIONS[self.collection_var.get()]}\n"
                         f"Selected TPIDs: {selected_tpids}\n"
                         f"{date_range_str}\n\n"
-                        "Pipeline #1 (counts all events by type):\n"
+                        "Pipeline (counts events by edifact code):\n"
                         f"{json.dumps(events_pipeline, indent=2, default=str)}\n\n"
-                        "Pipeline #2 (counts distinct parcels):\n"
-                        f"{json.dumps(parcels_pipeline, indent=2, default=str)}\n\n"
                         f"Using Index Hint: {hint}\n\n"
                         "Explanation:\n"
-                        "This query runs in two parts:\n"
-                        "1. First pipeline counts all events by type (edifact code and description)\n"
-                        "2. Second pipeline counts the number of unique tracking references (parcels)\n\n"
-                        "Note: We run two separate queries for optimal performance rather than using\n"
-                        "a more complex single query that might be less efficient."
+                        "1. Match documents based on TPID and date range filters\n"
+                        "2. Group by edifact_code to count occurrences\n"
+                        "3. Project the results in a clean format\n"
+                        "4. Sort by edifact_code for consistent display\n\n"
+                        "Note: In standard collections (nzpost_summary and nzpost_summary_item),\n"
+                        "each document represents a single parcel, so we don't need to count\n"
+                        "distinct parcels separately."
                     )
                     
                     text.insert(tk.END, details)
